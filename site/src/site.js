@@ -7,9 +7,15 @@
    Rewritten to match REAL photos of UMG Uralsk territory. */
 
 import * as THREE from 'three';
-import { Batch, DEG, LAYOUT, TEX, mulberry32, polar, fbm, clamp, smoothstep, cachedMaterial } from './core.js';
+import { Batch, DEG, LAYOUT, TEX, mulberry32, fbm, cachedMaterial, loadGLB, prepareModel } from './core.js';
 
 const S = LAYOUT.site;
+
+function groundY(x, z) {
+  const d = Math.hypot(x, z - 10);
+  const roll = Math.max(0, d - 70) * 0.012 + (fbm(x * 0.02 + 5, z * 0.02, 3) - 0.5) * Math.max(0, d - 60) * 0.09;
+  return roll - 0.06;
+}
 
 /* ---------------------------------------------------------------- ground */
 function ground(scene, M) {
@@ -19,9 +25,7 @@ function ground(scene, M) {
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i) + (S.x0 + S.x1) / 2;
     const z = pos.getZ(i) + (S.z0 + S.z1) / 2;
-    const d = Math.hypot(x, z - 10);
-    const roll = Math.max(0, d - 70) * 0.012 + (fbm(x * 0.02 + 5, z * 0.02, 3) - 0.5) * Math.max(0, d - 60) * 0.09;
-    pos.setY(i, roll - 0.06);
+    pos.setY(i, groundY(x, z));
   }
   g.computeVertexNormals();
   const mesh = new THREE.Mesh(g, M.grass);
@@ -110,152 +114,119 @@ function gatehouse(batch, M) {
 }
 
 /* ---------------------------------------------------------------- trees */
-/* Lush multi-tier procedural spruce with layered conical branches,
-   color variation and irregular silhouette (NOT plastic cones!) */
-function proceduralSpruceGeometry(rnd, isBlue) {
+function placeGLBTreeInstances(scene, gltf, spots, rnd, { targetHeight = 9.2, foliageTint = null } = {}) {
+  if (!spots.length || !gltf || !gltf.scene) return;
+
+  const root = gltf.scene;
+  root.updateMatrixWorld(true);
+  const fullBox = new THREE.Box3().setFromObject(root);
+  const fullSize = new THREE.Vector3();
+  fullBox.getSize(fullSize);
+  const normScale = fullSize.y > 1e-4 ? targetHeight / fullSize.y : 1;
+  const minY = fullBox.min.y;
+
   const parts = [];
-  // Trunk
-  const trunk = new THREE.CylinderGeometry(0.08, 0.16, 3.6, 6);
-  trunk.translate(0, 1.8, 0);
-  parts.push({ geo: trunk, isTrunk: true });
-
-  // Multiple branch tiers with varying radius, droop and irregularity
-  const tiers = 8 + Math.floor(rnd() * 3);
-  for (let t = 0; t < tiers; t++) {
-    const frac = t / tiers;
-    const baseR = (2.0 - frac * 1.5) * (0.9 + rnd() * 0.2);
-    const tierY = 2.4 + t * 0.95;
-    const tierH = 1.3 * (1 - frac * 0.25);
-    // Each tier has 2-3 sub-cones for lush fullness
-    const nSub = 2 + Math.floor(rnd() * 2);
-    for (let s = 0; s < nSub; s++) {
-      const r = baseR * (0.85 + s * 0.12) * (0.9 + rnd() * 0.2);
-      const h = tierH * (0.8 + rnd() * 0.4);
-      const seg = 7 + Math.floor(rnd() * 4);
-      const cone = new THREE.ConeGeometry(r, h, seg, 1, true);
-      // Slight random offset for natural look
-      const dx = (rnd() - 0.5) * 0.15;
-      const dz = (rnd() - 0.5) * 0.15;
-      const dy = tierY + s * 0.2 + h / 2;
-      cone.translate(dx, dy, dz);
-      parts.push({ geo: cone, isTrunk: false });
+  root.traverse((obj) => {
+    if (!obj.isMesh || !obj.geometry) return;
+    const geom = obj.geometry.clone();
+    geom.applyMatrix4(obj.matrixWorld);
+    const srcMat = Array.isArray(obj.material) ? obj.material[0] : obj.material;
+    const mat = srcMat ? srcMat.clone() : new THREE.MeshStandardMaterial({ color: 0x3f6d5c });
+    const isFoliage = (mat.name && /foliage|leaf|needle/i.test(mat.name)) || mat.transparent || !!mat.alphaMap;
+    if (isFoliage) {
+      mat.transparent = false;
+      mat.alphaTest = 0.45;
+      mat.side = THREE.DoubleSide;
+      mat.roughness = Math.max(mat.roughness ?? 0.88, 0.88);
+      mat.metalness = 0.0;
+      mat.envMapIntensity = 0.34;
+      if (foliageTint) mat.color.multiply(new THREE.Color(foliageTint));
+    } else {
+      mat.roughness = Math.max(mat.roughness ?? 0.92, 0.92);
+      mat.metalness = 0.0;
+      mat.envMapIntensity = 0.28;
     }
-  }
-  return parts;
-}
+    mat.needsUpdate = true;
+    parts.push({ geom, mat });
+  });
 
-/* Deciduous tree (simpler sphere-ish canopy) */
-function deciduousTreeGeometry(rnd) {
-  const parts = [];
-  const trunk = new THREE.CylinderGeometry(0.1, 0.2, 4.5, 6);
-  trunk.translate(0, 2.25, 0);
-  parts.push({ geo: trunk, isTrunk: true });
-  // 3-4 sphere clusters for canopy
-  const nBlobs = 3 + Math.floor(rnd() * 2);
-  for (let b = 0; b < nBlobs; b++) {
-    const r = 1.8 + rnd() * 1.2;
-    const sphere = new THREE.SphereGeometry(r, 8, 6);
-    sphere.translate(
-      (rnd() - 0.5) * 1.5,
-      5.5 + rnd() * 2.0,
-      (rnd() - 0.5) * 1.5
-    );
-    parts.push({ geo: sphere, isTrunk: false });
-  }
-  return parts;
-}
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const euler = new THREE.Euler();
+  const pos = new THREE.Vector3();
+  const scl = new THREE.Vector3();
 
-function mergeTreeParts(parts) {
-  const trunkGeos = [], foliageGeos = [];
-  for (const p of parts) {
-    const g = p.geo.index ? p.geo.toNonIndexed() : p.geo;
-    if (!g.attributes.uv) {
-      const n = g.attributes.position.count;
-      g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(n * 2), 2));
+  for (const { geom, mat } of parts) {
+    const inst = new THREE.InstancedMesh(geom, mat, spots.length);
+    inst.castShadow = true;
+    inst.receiveShadow = true;
+    for (let i = 0; i < spots.length; i++) {
+      const sp = spots[i];
+      const scXZ = normScale * sp.s * (0.92 + rnd() * 0.16);
+      const scY = scXZ * (0.94 + rnd() * 0.12);
+      euler.set(0, sp.rot ?? (rnd() * Math.PI * 2), 0);
+      q.setFromEuler(euler);
+      const gy = sp.x > -34 && sp.x < 34 && sp.z > 8 && sp.z < 45 ? 0 : groundY(sp.x, sp.z);
+      pos.set(sp.x, gy - minY * scY - 0.05, sp.z);
+      scl.set(scXZ, scY, scXZ);
+      m.compose(pos, q, scl);
+      inst.setMatrixAt(i, m);
     }
-    (p.isTrunk ? trunkGeos : foliageGeos).push(g);
+    inst.instanceMatrix.needsUpdate = true;
+    scene.add(inst);
   }
-  return { trunk: mergeSimple(trunkGeos), foliage: mergeSimple(foliageGeos) };
 }
 
 function trees(scene, M) {
-  const rndSeed = mulberry32(4242);
-
-  /* ---- Generate spruce prototype geometries (blue and green variants) ---- */
-  const blueProto = mergeTreeParts(proceduralSpruceGeometry(mulberry32(1001), true));
-  const greenProto = mergeTreeParts(proceduralSpruceGeometry(mulberry32(2002), false));
-  const deciduousProto = mergeTreeParts(deciduousTreeGeometry(mulberry32(3003)));
-
-  const trunkMat = new THREE.MeshStandardMaterial({
-    color: 0x6a5544, roughness: 0.95, map: TEX.bark().map, bumpMap: TEX.bark().bump, bumpScale: 0.3,
-  });
-  const decidTrunkMat = new THREE.MeshStandardMaterial({
-    color: 0x5a4836, roughness: 0.95, map: TEX.bark().map, bumpMap: TEX.bark().bump, bumpScale: 0.3,
-  });
-  const decidFoliageMat = new THREE.MeshStandardMaterial({
-    color: 0x558844, roughness: 0.9, map: TEX.needle().map, bumpMap: TEX.needle().bump, bumpScale: 0.3,
-  });
+  const rnd = mulberry32(4242);
 
   /* ---- Place blue spruces ---- */
   const blueSpots = [];
-  const rnd = mulberry32(4242);
   // Avenue along the forecourt edges (as in photos)
   for (let i = 0; i < 7; i++) {
-    blueSpots.push({ x: -26 + i * 0.4, z: 36 - i * 0.6, s: 1.1 + rnd() * 0.15 });
-    blueSpots.push({ x: 26 - i * 0.4, z: 36 - i * 0.6, s: 1.1 + rnd() * 0.15 });
+    blueSpots.push({ x: -26 + i * 0.4, z: 36 - i * 0.6, s: 0.92 + rnd() * 0.14, rot: rnd() * Math.PI * 2 });
+    blueSpots.push({ x: 26 - i * 0.4, z: 36 - i * 0.6, s: 0.92 + rnd() * 0.14, rot: rnd() * Math.PI * 2 });
   }
   // Rows flanking the building
   for (let i = 0; i < 4; i++) {
-    blueSpots.push({ x: -34 + i * 4.4, z: 16.5, s: 0.95 + rnd() * 0.2 });
-    blueSpots.push({ x: 21 + i * 4.2, z: 18.5, s: 1.0 + rnd() * 0.2 });
+    blueSpots.push({ x: -34 + i * 4.4, z: 16.5, s: 0.85 + rnd() * 0.16, rot: rnd() * Math.PI * 2 });
+    blueSpots.push({ x: 21 + i * 4.2, z: 18.5, s: 0.88 + rnd() * 0.16, rot: rnd() * Math.PI * 2 });
   }
-  for (let i = 0; i < 6; i++) blueSpots.push({ x: -46 + i * 7, z: 40, s: 1.05 + rnd() * 0.25 });
+  for (let i = 0; i < 6; i++) blueSpots.push({ x: -46 + i * 7, z: 40, s: 0.92 + rnd() * 0.2, rot: rnd() * Math.PI * 2 });
 
   /* ---- Place green spruces ---- */
   const greenSpots = [];
-  for (let i = 0; i < 8; i++) greenSpots.push({ x: -48 + i * 9, z: -60 + rnd() * 4, s: 1.15 + rnd() * 0.3 });
-  for (let i = 0; i < 6; i++) greenSpots.push({ x: 58, z: -30 + i * 11, s: 1.0 + rnd() * 0.3 });
+  for (let i = 0; i < 8; i++) greenSpots.push({ x: -48 + i * 9, z: -60 + rnd() * 4, s: 1.0 + rnd() * 0.25, rot: rnd() * Math.PI * 2 });
+  for (let i = 0; i < 6; i++) greenSpots.push({ x: 58, z: -30 + i * 11, s: 0.9 + rnd() * 0.24, rot: rnd() * Math.PI * 2 });
 
-  /* ---- Place deciduous trees behind building ---- */
-  const decidSpots = [];
+  /* ---- Place birch trees behind & flanking building ---- */
+  const birchSpots = [];
   for (let i = 0; i < 8; i++) {
-    decidSpots.push({ x: -40 + rnd() * 80, z: -72 + rnd() * 10, s: 0.9 + rnd() * 0.4 });
+    birchSpots.push({ x: -40 + rnd() * 80, z: -72 + rnd() * 10, s: 0.92 + rnd() * 0.3, rot: rnd() * Math.PI * 2 });
   }
   for (let i = 0; i < 5; i++) {
-    decidSpots.push({ x: -55 + rnd() * 10, z: -20 + rnd() * 50, s: 1.0 + rnd() * 0.3 });
-    decidSpots.push({ x: 55 + rnd() * 10, z: -20 + rnd() * 50, s: 1.0 + rnd() * 0.3 });
+    birchSpots.push({ x: -55 + rnd() * 10, z: -20 + rnd() * 50, s: 0.95 + rnd() * 0.25, rot: rnd() * Math.PI * 2 });
+    birchSpots.push({ x: 55 + rnd() * 10, z: -20 + rnd() * 50, s: 0.95 + rnd() * 0.25, rot: rnd() * Math.PI * 2 });
   }
 
   // Filter out trees colliding with buildings
   const filter = (sp) => Math.hypot(sp.x, sp.z) > 22.0;
   const filteredBlue = blueSpots.filter(filter);
   const filteredGreen = greenSpots.filter(filter);
-  const filteredDecid = decidSpots.filter(filter);
+  const filteredBirch = birchSpots.filter(filter);
 
-  // Create instanced meshes for each tree type
-  function placeInstances(spots, trunkGeo, foliageGeo, tMat, fMat) {
-    if (!spots.length) return;
-    const trunks = new THREE.InstancedMesh(trunkGeo, tMat, spots.length);
-    const foliage = new THREE.InstancedMesh(foliageGeo, fMat, spots.length);
-    trunks.castShadow = true; trunks.receiveShadow = true;
-    foliage.castShadow = true; foliage.receiveShadow = true;
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    spots.forEach((sp, i) => {
-      const sc = sp.s * (0.9 + rnd() * 0.2);
-      q.setFromEuler(new THREE.Euler(0, rnd() * Math.PI * 2, 0));
-      m.compose(new THREE.Vector3(sp.x, 0, sp.z), q, new THREE.Vector3(sc, sc * (0.95 + rnd() * 0.1), sc));
-      trunks.setMatrixAt(i, m);
-      foliage.setMatrixAt(i, m);
-    });
-    trunks.instanceMatrix.needsUpdate = true;
-    foliage.instanceMatrix.needsUpdate = true;
-    scene.add(trunks, foliage);
-  }
+  loadGLB('./assets/models/tree_spruce.glb')
+    .then((spruceGltf) => {
+      placeGLBTreeInstances(scene, spruceGltf, filteredBlue, mulberry32(1101), { targetHeight: 8.6, foliageTint: 0x8db8c8 });
+      placeGLBTreeInstances(scene, spruceGltf, filteredGreen, mulberry32(2202), { targetHeight: 9.6, foliageTint: 0xa4c09c });
+    })
+    .catch(() => {});
 
-  placeInstances(filteredBlue, blueProto.trunk, blueProto.foliage, trunkMat, M.spruceBlue);
-  placeInstances(filteredGreen, greenProto.trunk, greenProto.foliage, trunkMat, M.spruceGreen);
-  placeInstances(filteredDecid, deciduousProto.trunk, deciduousProto.foliage, decidTrunkMat, decidFoliageMat);
+  loadGLB('./assets/models/tree_birch.glb')
+    .then((birchGltf) => {
+      placeGLBTreeInstances(scene, birchGltf, filteredBirch, mulberry32(3303), { targetHeight: 9.8 });
+    })
+    .catch(() => {});
 
   /* ---- Clipped hedges ---- */
   const hedgeBatch = new Batch();
@@ -316,28 +287,8 @@ function trees(scene, M) {
   hedgeBatch.build(scene, { cast: true, receive: true, name: 'landscaping' });
 }
 
-function mergeSimple(geoms) {
-  if (!geoms.length) return new THREE.BufferGeometry();
-  const nonIdx = geoms.map((g) => (g.index ? g.toNonIndexed() : g));
-  let total = 0;
-  for (const g of nonIdx) total += g.attributes.position.count;
-  const pos = new Float32Array(total * 3), nor = new Float32Array(total * 3), uv = new Float32Array(total * 2);
-  let o = 0;
-  for (const gg of nonIdx) {
-    pos.set(gg.attributes.position.array, o * 3);
-    nor.set(gg.attributes.normal.array, o * 3);
-    if (gg.attributes.uv) uv.set(gg.attributes.uv.array, o * 2);
-    o += gg.attributes.position.count;
-  }
-  const out = new THREE.BufferGeometry();
-  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-  out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-  return out;
-}
-
 /* ---------------------------------------------------------------- lamps */
-/* Classic park lamps with white glass globe (as in ext_c.jpg photos!) */
+/* Classic park lamps with white glass globe */
 function lamps(scene, M, nightLights) {
   const pts = [];
   for (let i = 0; i < 5; i++) { pts.push([-24 + i * 12, 44]); pts.push([-24 + i * 12, 34]); }
@@ -351,22 +302,16 @@ function lamps(scene, M, nightLights) {
 
   const batch = new Batch();
   for (const [x, z] of pts) {
-    // Lamp post (dark metal, tapered)
     batch.cyl(M.metalDark, 0.055, 0.1, 4.0, 8, x, 2.0, z);
-    // Base pedestal
     batch.cyl(M.metalDark, 0.22, 0.28, 0.3, 10, x, 0.15, z);
     batch.box(M.metalDark, 0.4, 0.08, 0.4, x, 0.04, z);
-    // Decorative cap under globe
     batch.cyl(M.metalDark, 0.14, 0.18, 0.12, 8, x, 4.06, z);
-    // White glass globe
     const sphere = new THREE.SphereGeometry(0.22, 12, 8);
     batch.add(sphere, globeMat, new THREE.Matrix4().makeTranslation(x, 4.28, z));
-    // Top finial
     batch.cyl(M.metalDark, 0.03, 0.06, 0.1, 6, x, 4.55, z);
   }
   batch.build(scene, { cast: true, receive: false, name: 'lamps' });
 
-  // A few real point lights for illumination
   for (let i = 0; i < 4; i++) {
     const [x, z] = pts[i * 3] || pts[0];
     const l = new THREE.PointLight(0xffd9a0, 0, 18, 2);
@@ -377,39 +322,58 @@ function lamps(scene, M, nightLights) {
 }
 
 /* ----------------------------------------------------------------- cars */
-function parking(scene, M) {
-  const colors = [0x2b2f36, 0x8f9296, 0xb5b9bd, 0x1e2a38, 0x6b1f22, 0xe8e8e6, 0x1a4060, 0x4a4a4a];
+function parking(scene) {
+  const colors = [0x242830, 0x9aa0a8, 0xc8ccd2, 0x1b2b3d, 0x5c1a1e, 0xebebe8, 0x26435e, 0x45494e];
   const rnd = mulberry32(9);
   const group = new THREE.Group();
-  const sub = new Batch();
-  const glass = cachedMaterial({ color: 0x1a2028, metalness: 0.6, roughness: 0.08, envMapIntensity: 1.3 });
-  const tailMat = cachedMaterial({ color: 0xcc2020, emissive: 0x880000, emissiveIntensity: 0.3, roughness: 0.5 });
-  for (let i = 0; i < 9; i++) {
-    const x = 14.5 + i * 2.9 + 1.45, z = -46 + (rnd() - 0.5) * 0.5;
-    const m = new THREE.Matrix4().compose(
-      new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0.02 + rnd() * 0.03, 0)), new THREE.Vector3(1, 1, 1));
-    sub.setParent(m);
-    const col = colors[Math.floor(rnd() * colors.length)];
-    const body = cachedMaterial({ color: col, metalness: 0.65, roughness: 0.28, envMapIntensity: 1.3 });
-    // Modern sedan silhouette (more detailed)
-    sub.box(body, 1.85, 0.52, 4.5, 0, 0.56, 0);       // Lower body
-    sub.box(body, 1.82, 0.14, 4.3, 0, 0.88, 0);       // Belt line
-    sub.box(body, 1.72, 0.48, 2.5, 0, 1.12, -0.2);    // Cabin
-    sub.box(glass, 1.66, 0.42, 2.25, 0, 1.14, -0.2);  // Windows
-    sub.box(M.metalDark, 1.9, 0.18, 4.6, 0, 0.36, 0); // Underbody
-    // Wheels
-    for (const [wx, wz] of [[-0.86, 1.4], [0.86, 1.4], [-0.86, -1.4], [0.86, -1.4]]) {
-      sub.cyl(M.metalDark, 0.32, 0.32, 0.22, 12, wx, 0.32, wz);
-      // Chrome rims
-      sub.cyl(M.chrome, 0.2, 0.2, 0.06, 8, wx, 0.32, wz);
-    }
-    // Headlights / taillights
-    for (const [dx, dz] of [[-0.72, 2.24], [0.72, 2.24]]) sub.box(M.lampGlow, 0.36, 0.1, 0.06, dx, 0.72, dz);
-    for (const [dx, dz] of [[-0.72, -2.24], [0.72, -2.24]]) sub.box(tailMat, 0.3, 0.08, 0.04, dx, 0.72, dz);
-  }
-  sub.setParent(null);
-  sub.build(group, { cast: true, receive: true, name: 'cars' });
+  group.name = 'cars';
   scene.add(group);
+
+  Promise.all([
+    loadGLB('./assets/models/car_sedan.glb'),
+    loadGLB('./assets/models/car_suv.glb'),
+  ]).then(([sedanGltf, suvGltf]) => {
+    for (let i = 0; i < 10; i++) {
+      if (i === 5) continue; // leave one open stall naturally
+      const isSUV = rnd() > 0.45;
+      const gltf = isSUV ? suvGltf : sedanGltf;
+      const col = colors[Math.floor(rnd() * colors.length)];
+      const car = prepareModel(gltf.scene.clone(true), {
+        groundY: 0.06,
+        centerXZ: true,
+        cloneMaterials: true,
+        envMapIntensity: 1.15,
+        onMesh(obj) {
+          const mat = obj.material;
+          if (!mat) return;
+          if (mat.name === 'CarPaint') {
+            mat.color.setHex(col);
+            mat.metalness = 0.65;
+            mat.roughness = 0.24;
+            mat.envMapIntensity = 1.35;
+          } else if (mat.name === 'CarGlass') {
+            mat.color.setHex(0x18202a);
+            mat.metalness = 0.25;
+            mat.roughness = 0.06;
+            mat.envMapIntensity = 1.5;
+          } else if (mat.name === 'CarRim') {
+            mat.metalness = 0.9;
+            mat.roughness = 0.18;
+            mat.envMapIntensity = 1.45;
+          } else if (mat.name === 'Headlight' || mat.name === 'Taillight') {
+            mat.emissiveIntensity = 0.25;
+          }
+        },
+      });
+      const x = 14 + i * 2.9 + 1.45;
+      const z = -46 + (rnd() - 0.5) * 0.45;
+      car.position.x = x;
+      car.position.z = z;
+      car.rotation.y = (rnd() > 0.25 ? 0 : Math.PI) + (rnd() - 0.5) * 0.06;
+      group.add(car);
+    }
+  }).catch(() => {});
+
   return group;
 }
 

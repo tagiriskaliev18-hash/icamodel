@@ -659,20 +659,87 @@ function galleryMass(batch, M) {
       batch.box(M.metalDark, 0.08, h - 0.5, 0.12, pOut.x, (h - 0.5) / 2 + 0.1, pOut.z, ry);
     }
   }
-  // Entrance glass door frames with dark brown profile
+  // Entrance glass vestibule (тамбур) with outer & inner automatic sliding double doors
   for (const sgn of [-1, 1]) {
     const t = (180 + sgn * 12) * DEG;
     const p = polar(t, r1 - 0.18);
-    batch.box(M.metalDark, 0.18, h - 0.4, 0.24, p.x, (h - 0.4) / 2, p.z, Math.atan2(Math.sin(t), -Math.cos(t)));
+    batch.box(M.metalDark, 0.18, h - 0.36, 0.24, p.x, (h - 0.36) / 2, p.z, Math.atan2(Math.sin(t), -Math.cos(t)));
   }
-  // Double glass doors in the central portal
+
+  const vestW = 2.60;
+  const vestZOut = 18.42;
+  const vestZIn = 14.85;
+  const doorClearW = 1.35;
+  const doorH = 2.86;
+  const soffitY = h - 0.34;
+  const doorGlass = M.glass || M.glassBronze;
+  const frameMat = M.metalDark;
+  const steelMat = M.brushedSteel || M.chrome;
+  const sensorMat = cachedMaterial({ color: 0x101318, roughness: 0.35, metalness: 0.4 });
+  const sensorLedMat = cachedMaterial({ color: 0x00e68a, emissive: 0x00e68a, emissiveIntensity: 0.75 });
+  const matCarpet = cachedMaterial({ color: 0x1f2228, roughness: 0.95, metalness: 0.02 });
+
+  // Outer & inner automatic sliding glass door portals
+  for (const pz of [vestZOut, vestZIn]) {
+    // Full-width dark anodized transom beam & upper glazed fanlight
+    batch.box(frameMat, vestW * 2 + 0.16, 0.16, 0.18, 0, doorH + 0.08, pz);
+    batch.box(frameMat, vestW * 2 + 0.16, 0.10, 0.16, 0, soffitY - 0.05, pz);
+    batch.box(doorGlass, vestW * 2 - 0.12, soffitY - doorH - 0.22, 0.04, 0, (doorH + 0.16 + soffitY - 0.10) / 2, pz);
+    // Overhead automatic radar motion sensor + status indicator
+    batch.box(sensorMat, 0.28, 0.075, 0.095, 0, doorH + 0.19, pz + (pz === vestZOut ? 0.09 : -0.09));
+    batch.box(sensorLedMat, 0.022, 0.012, 0.01, 0, doorH + 0.19, pz + (pz === vestZOut ? 0.14 : -0.14));
+    // Stainless steel floor sliding guide rail
+    batch.box(steelMat, vestW * 2, 0.012, 0.06, 0, 0.006, pz);
+
+    for (const sgn of [-1, 1]) {
+      // Main portal jambs & outer corner posts
+      batch.box(frameMat, 0.10, soffitY, 0.14, sgn * doorClearW, soffitY / 2, pz);
+      batch.box(frameMat, 0.12, soffitY, 0.14, sgn * vestW, soffitY / 2, pz);
+      // Fixed glazed sidelights (|x| = 1.35..2.60)
+      const sideW = vestW - doorClearW - 0.10;
+      const sideX = sgn * ((doorClearW + vestW) / 2);
+      batch.box(doorGlass, sideW, doorH - 0.12, 0.04, sideX, (doorH - 0.06) / 2, pz);
+      batch.box(frameMat, sideW, 0.08, 0.10, sideX, 0.04, pz);
+
+      // Open automatic sliding glass double-door leaf parked neatly in front of sidelight
+      const leafX = sgn * (doorClearW + 0.56);
+      const leafZ = pz + (pz === vestZOut ? -0.055 : 0.055);
+      batch.box(doorGlass, 1.24, doorH - 0.08, 0.03, leafX, doorH / 2, leafZ);
+      batch.box(frameMat, 1.26, 0.05, 0.05, leafX, 0.025, leafZ);
+      batch.box(frameMat, 1.26, 0.05, 0.05, leafX, doorH - 0.04, leafZ);
+      batch.box(frameMat, 0.045, doorH, 0.05, leafX - sgn * 0.61, doorH / 2, leafZ);
+      batch.box(frameMat, 0.045, doorH, 0.05, leafX + sgn * 0.61, doorH / 2, leafZ);
+      // Brushed stainless vertical pull handle
+      batch.cyl(M.chrome, 0.016, 0.016, 0.92, 10, leafX - sgn * 0.48, 1.18, leafZ + (pz === vestZOut ? 0.05 : -0.05));
+    }
+  }
+
+  // Vestibule glazed side enclosure walls (connecting outer & inner portals)
+  const vestLen = vestZOut - vestZIn;
+  const vestMidZ = (vestZOut + vestZIn) / 2;
   for (const sgn of [-1, 1]) {
-    const t = (180 + sgn * 5) * DEG;
-    const p = polar(t, r1 - 0.15);
-    batch.box(M.glassBronze, 1.6, h - 0.8, 0.06, p.x, (h - 0.8) / 2 + 0.2, p.z, Math.atan2(Math.sin(t), -Math.cos(t)));
-    // Door handles
-    const ph = polar(t, r1 - 0.08);
-    batch.box(M.chrome, 0.04, 0.5, 0.06, ph.x, h * 0.45, ph.z, Math.atan2(Math.sin(t), -Math.cos(t)));
+    batch.box(doorGlass, 0.04, soffitY - 0.14, vestLen - 0.12, sgn * vestW, soffitY / 2, vestMidZ);
+    batch.box(frameMat, 0.10, 0.09, vestLen, sgn * vestW, 0.045, vestMidZ);
+    batch.box(frameMat, 0.10, 0.10, vestLen, sgn * vestW, soffitY - 0.05, vestMidZ);
+    for (const mz of [vestZIn + vestLen * 0.34, vestZIn + vestLen * 0.67]) {
+      batch.box(frameMat, 0.07, soffitY, 0.07, sgn * vestW, soffitY / 2, mz);
+    }
+  }
+
+  // Recessed ribbed entrance floor mat (грязезащитный ковёр) inset in brushed-steel frame
+  batch.box(steelMat, 4.48, 0.014, 3.06, 0, 0.007, vestMidZ);
+  batch.box(matCarpet, 4.32, 0.016, 2.90, 0, 0.008, vestMidZ);
+  for (let r = -6; r <= 6; r++) {
+    batch.box(steelMat, 4.24, 0.004, 0.018, 0, 0.017, vestMidZ + r * 0.21);
+  }
+
+  // Vestibule ceiling LED soffit downlights
+  const downlightMat = M.lampPanel || M.lampGlow;
+  for (const dx of [-1.25, 1.25]) {
+    for (const dz of [vestZIn + 0.95, vestZOut - 0.95]) {
+      batch.cyl(steelMat, 0.14, 0.15, 0.02, 16, dx, soffitY - 0.01, dz);
+      batch.cyl(downlightMat, 0.11, 0.11, 0.025, 16, dx, soffitY - 0.018, dz);
+    }
   }
   // Parapet ring
   const ringSeg = 40;
@@ -883,6 +950,15 @@ export function buildBuilding(scene, M, colliders) {
     const p = polar(deg * DEG, G.r1 - 0.18);
     colliders.push({ type: 'circle', x: p.x, z: p.z, r: 1.15, y0: 0, y1: G.h + PODIUM });
   }
+  // Vestibule glass side walls & fixed portal sidelights (center x = -1.35..+1.35 remains open!)
+  for (const sgn of [-1, 1]) {
+    const wx = sgn * 2.60;
+    colliders.push({ type: 'rect', x0: wx - 0.10, x1: wx + 0.10, z0: 14.80, z1: 18.48, y0: PODIUM, y1: PODIUM + G.h });
+    const xMin = sgn < 0 ? -2.65 : 1.35;
+    const xMax = sgn < 0 ? -1.35 : 2.65;
+    colliders.push({ type: 'rect', x0: xMin, x1: xMax, z0: 18.28, z1: 18.56, y0: PODIUM, y1: PODIUM + G.h });
+    colliders.push({ type: 'rect', x0: xMin, x1: xMax, z0: 14.72, z1: 14.98, y0: PODIUM, y1: PODIUM + G.h });
+  }
 
   // Block wing exterior wall box colliders (preserving central east corridor z = -2.2..1.2)
   const wallTop = ROOF + PODIUM;
@@ -938,7 +1014,7 @@ export function buildInteriorShell(scene, M) {
       batch.add(disc, M.marbleFloor, new THREE.Matrix4().makeTranslation(0, y - 0.08, 0));
     } else {
       // Upper rotunda levels — annular marble gallery leaving elevator shaft & grand stairwells open
-      addRotundaRing(batch, M.marbleFloor, R.core + 0.04, R.hall, y, false, i === 1 || i === 2);
+      addRotundaRing(batch, M.marbleFloor, R.core + 0.04, R.hall, y, false, i >= 1);
     }
     // Wing floor — warm light oak laminate
     batch.box(M.oakLaminate, W.half * 2 - 0.2, 0.16, W.s1 - wS0, ax * (wS0 + W.s1) / 2, y - 0.08, az * (wS0 + W.s1) / 2, wRy);
@@ -954,8 +1030,8 @@ export function buildInteriorShell(scene, M) {
     batch.box(M.ceiling, B.x1 - B.x0 - 0.2, 0.04, B.z1 - B.z0 - 0.2, (B.x0 + B.x1) / 2, cy, (B.z0 + B.z1) / 2);
     batch.box(M.ceiling, 1.4, 0.04, 3.6, -8.8, cy, -0.5);
     batch.box(M.ceiling, W.half * 2 - 0.3, 0.04, W.s1 - wS0, ax * (wS0 + W.s1) / 2, cy, az * (wS0 + W.s1) / 2, wRy);
-    // Rotunda ceiling (white Armstrong ring on every floor, open above grand stairwells on levels 0 & 1)
-    addRotundaRing(batch, M.ceiling, R.core + 0.04, R.hall, cy, true, i === 0 || i === 1);
+    // Rotunda ceiling (white Armstrong ring on every floor, open above grand stairwells on levels 0, 1 & 2)
+    addRotundaRing(batch, M.ceiling, R.core + 0.04, R.hall, cy, true, i < 3);
   }
   // Rotunda roof cap
   batch.add(new THREE.CylinderGeometry(R.hall, R.hall, 0.06, 64), M.ceiling, new THREE.Matrix4().makeTranslation(0, ROOF - 0.08, 0));

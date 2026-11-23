@@ -4,6 +4,9 @@
    interior (interior.js) through the shared `M` dictionary from makeMaterials(). */
 
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 
 export const DEG = Math.PI / 180;
 export const TAU = Math.PI * 2;
@@ -644,59 +647,228 @@ function makePainting() {
   });
 }
 
+/* --------------------------------------------------------------- PBR & GLB asset loaders */
+const _texLoader = new THREE.TextureLoader();
+const _pbrTexCache = new Map();
+
+function loadTex(url, { srgb = false, repeat = [1, 1], aniso = 8, remap = null } = {}) {
+  const key = `${url}|${repeat[0]}|${repeat[1]}|${srgb ? 1 : 0}|${remap ? remap.join(',') : ''}`;
+  if (_pbrTexCache.has(key)) return _pbrTexCache.get(key);
+
+  const tex = _texLoader.load(
+    url,
+    (loaded) => {
+      if (remap && loaded.image) {
+        const w = Math.min(512, loaded.image.width || 512);
+        const h = Math.min(512, loaded.image.height || 512);
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(loaded.image, 0, 0, w, h);
+        const img = ctx.getImageData(0, 0, w, h);
+        const [minR, maxR] = remap;
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const v = Math.round((minR + (d[i] / 255) * (maxR - minR)) * 255);
+          d[i] = d[i + 1] = d[i + 2] = v;
+        }
+        ctx.putImageData(img, 0, 0);
+        loaded.image = c;
+      }
+      loaded.needsUpdate = true;
+    },
+    undefined,
+    () => console.warn('[core] Failed PBR texture:', url)
+  );
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(repeat[0], repeat[1]);
+  tex.anisotropy = aniso;
+  tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  _pbrTexCache.set(key, tex);
+  return tex;
+}
+
+export function loadPBRSet(name, { repeat = [1, 1], aniso = 8, roughRemap = null } = {}) {
+  return {
+    map: loadTex(`./assets/pbr/${name}_col.jpg`, { srgb: true, repeat, aniso }),
+    normalMap: loadTex(`./assets/pbr/${name}_nor.jpg`, { srgb: false, repeat, aniso }),
+    roughnessMap: loadTex(`./assets/pbr/${name}_rough.jpg`, { srgb: false, repeat, aniso, remap: roughRemap }),
+  };
+}
+
+const _dracoLoader = new DRACOLoader();
+_dracoLoader.setDecoderPath('./vendor/draco/');
+const _gltfLoader = new GLTFLoader();
+_gltfLoader.setDRACOLoader(_dracoLoader);
+const _glbCache = new Map();
+
+export function loadGLB(url) {
+  if (_glbCache.has(url)) return _glbCache.get(url);
+  const p = new Promise((resolve, reject) => {
+    _gltfLoader.load(url, resolve, undefined, (err) => {
+      console.warn('[core] Failed GLB:', url, err);
+      reject(err);
+    });
+  });
+  _glbCache.set(url, p);
+  return p;
+}
+
+export function prepareModel(root, {
+  targetHeight = null,
+  groundY = 0,
+  centerXZ = false,
+  castShadow = true,
+  receiveShadow = true,
+  envMapIntensity = 0.85,
+  cloneMaterials = false,
+  onMesh = null,
+} = {}) {
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(root);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+
+  if (targetHeight && size.y > 1e-4) {
+    const s = targetHeight / size.y;
+    root.scale.multiplyScalar(s);
+    root.updateMatrixWorld(true);
+    box.setFromObject(root);
+  }
+
+  box.getCenter(center);
+  if (centerXZ) {
+    root.position.x -= center.x;
+    root.position.z -= center.z;
+  }
+  if (groundY !== null && groundY !== undefined) {
+    root.position.y += groundY - box.min.y;
+  }
+
+  root.traverse((obj) => {
+    if (!obj.isMesh) return;
+    obj.castShadow = castShadow;
+    obj.receiveShadow = receiveShadow;
+    const applyMat = (m) => {
+      const mat = cloneMaterials ? m.clone() : m;
+      if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
+        if (mat.envMapIntensity === undefined || mat.envMapIntensity === 1) {
+          mat.envMapIntensity = envMapIntensity;
+        }
+      }
+      return mat;
+    };
+    if (Array.isArray(obj.material)) {
+      obj.material = obj.material.map(applyMat);
+    } else if (obj.material) {
+      obj.material = applyMat(obj.material);
+    }
+    if (onMesh) onMesh(obj);
+  });
+
+  root.updateMatrixWorld(true);
+  return root;
+}
+
+export async function cloneGLB(url, opts = {}) {
+  const gltf = await loadGLB(url);
+  const clone = gltf.scene.clone(true);
+  return prepareModel(clone, opts);
+}
+
+const _rgbeLoader = new RGBELoader();
+export function loadHDR(url, pmremGenerator) {
+  return new Promise((resolve, reject) => {
+    _rgbeLoader.load(
+      url,
+      (hdrTex) => {
+        hdrTex.mapping = THREE.EquirectangularReflectionMapping;
+        const rt = pmremGenerator.fromEquirectangular(hdrTex);
+        hdrTex.dispose();
+        resolve({ renderTarget: rt, texture: rt.texture });
+      },
+      undefined,
+      (err) => {
+        console.warn('[core] Failed HDR:', url, err);
+        reject(err);
+      }
+    );
+  });
+}
+
 /* --------------------------------------------------------------- materials */
 export function makeMaterials(env) {
-  const plasterT = TEX.plaster(), stone = TEX.stone(), granite = TEX.granite();
-  const paving = TEX.paving(), brick = TEX.brickPaving(), asphalt = TEX.asphalt();
-  const grassT = TEX.grass(), marbleT = TEX.marble(), neroT = TEX.neroMarble(), wood = TEX.wood();
-  const oakLam = TEX.oakLaminate(), walnutT = TEX.walnut(), walnutSlatT = TEX.walnutSlat();
+  const plasterT = TEX.plaster();
+  const grassT = TEX.grass(), walnutSlatT = TEX.walnutSlat();
   const brushedT = TEX.brushedMetal(), leatherT = TEX.leather();
   const carpet = TEX.carpet(), ceil = TEX.ceiling(), fabricT = TEX.fabric();
   const needleBlue = TEX.needleBlue();
 
+  // Real staged PBR texture sets
+  const travPBR = loadPBRSet('travertine', { repeat: [2, 2], roughRemap: [0.58, 0.78] });
+  const granitePBR = loadPBRSet('granite', { repeat: [2, 2], roughRemap: [0.36, 0.54] });
+  const graniteDarkPBR = loadPBRSet('granite', { repeat: [2, 2], roughRemap: [0.46, 0.64] });
+  const paverPBR = loadPBRSet('paver', { repeat: [10, 14] });
+  const asphaltPBR = loadPBRSet('asphalt', { repeat: [12, 12] });
+  const marblePBR = loadPBRSet('marble', { repeat: [4, 4], roughRemap: [0.14, 0.22] });
+  const neroPBR = loadPBRSet('nero', { repeat: [2, 2], roughRemap: [0.14, 0.28] });
+  const walnutDoorPBR = loadPBRSet('walnut', { repeat: [1, 1] });
+  const oakFloorPBR = loadPBRSet('walnut', { repeat: [4, 4], roughRemap: [0.34, 0.52] });
+  const woodLightPBR = loadPBRSet('walnut', { repeat: [2, 2], roughRemap: [0.36, 0.54] });
+  const rockPBR = loadPBRSet('rock', { repeat: [4, 4], roughRemap: [0.78, 0.94] });
+
   const M = {
     /* ==================== EXTERIOR ==================== */
     plaster: new THREE.MeshStandardMaterial({
-      color: 0xe6dcc0, map: plasterT.map, bumpMap: plasterT.bump, bumpScale: 0.35,
+      color: 0xe6dcc0, map: plasterT.map, normalMap: travPBR.normalMap, normalScale: new THREE.Vector2(0.24, 0.24),
       roughness: 0.92, roughnessMap: plasterT.roughness, metalness: 0,
       side: THREE.DoubleSide,
     }),
     plasterWarm: new THREE.MeshStandardMaterial({
-      color: 0xdecba6, map: plasterT.map, bumpMap: plasterT.bump, bumpScale: 0.3, roughness: 0.95,
+      color: 0xdecba6, map: plasterT.map, normalMap: travPBR.normalMap, normalScale: new THREE.Vector2(0.22, 0.22), roughness: 0.94,
     }),
     stone: new THREE.MeshStandardMaterial({
-      color: 0xf7f4eb, map: stone.map, bumpMap: stone.bump, bumpScale: 0.18, roughness: 0.72, envMapIntensity: 0.48,
+      color: 0xfbf7ee, map: travPBR.map, normalMap: travPBR.normalMap, normalScale: new THREE.Vector2(0.42, 0.42),
+      roughness: 1.0, roughnessMap: travPBR.roughnessMap, envMapIntensity: 0.52,
     }),
     granite: new THREE.MeshStandardMaterial({
-      color: 0x9a6858, map: granite.map, bumpMap: granite.bump, bumpScale: 0.5,
-      roughness: 0.42, metalness: 0.02, envMapIntensity: 0.9,
+      color: 0xa67462, map: granitePBR.map, normalMap: granitePBR.normalMap, normalScale: new THREE.Vector2(0.45, 0.45),
+      roughness: 1.0, roughnessMap: granitePBR.roughnessMap, metalness: 0.02, envMapIntensity: 0.85,
     }),
     graniteDark: new THREE.MeshStandardMaterial({
-      color: 0x5c4a45, map: granite.map, bumpMap: granite.bump, bumpScale: 0.5, roughness: 0.5,
+      color: 0x62504b, map: graniteDarkPBR.map, normalMap: graniteDarkPBR.normalMap, normalScale: new THREE.Vector2(0.45, 0.45),
+      roughness: 1.0, roughnessMap: graniteDarkPBR.roughnessMap, envMapIntensity: 0.65,
     }),
     paver: new THREE.MeshStandardMaterial({
-      color: 0xc4917a, map: paving.map, bumpMap: paving.bump, bumpScale: 0.5,
-      roughness: 0.78, roughnessMap: paving.roughness,
+      color: 0xe6baa8, map: paverPBR.map, normalMap: paverPBR.normalMap, normalScale: new THREE.Vector2(0.55, 0.55),
+      roughness: 1.0, roughnessMap: paverPBR.roughnessMap, envMapIntensity: 0.42,
     }),
     paving: new THREE.MeshStandardMaterial({
-      color: 0xb9aca4, map: paving.map, bumpMap: paving.bump, bumpScale: 0.4, roughness: 0.88,
+      color: 0xd0c4bc, map: paverPBR.map, normalMap: paverPBR.normalMap, normalScale: new THREE.Vector2(0.45, 0.45),
+      roughness: 1.0, roughnessMap: paverPBR.roughnessMap, envMapIntensity: 0.4,
     }),
     brick: new THREE.MeshStandardMaterial({
-      color: 0xb88474, map: brick.map, bumpMap: brick.bump, bumpScale: 0.4, roughness: 0.9,
+      color: 0xd49c8c, map: paverPBR.map, normalMap: paverPBR.normalMap, normalScale: new THREE.Vector2(0.5, 0.5),
+      roughness: 1.0, roughnessMap: paverPBR.roughnessMap, envMapIntensity: 0.4,
     }),
     asphalt: new THREE.MeshStandardMaterial({
-      color: 0x6a6a6c, map: asphalt.map, bumpMap: asphalt.bump, bumpScale: 0.25, roughness: 0.96,
+      color: 0x9a9c9e, map: asphaltPBR.map, normalMap: asphaltPBR.normalMap, normalScale: new THREE.Vector2(0.45, 0.45),
+      roughness: 1.0, roughnessMap: asphaltPBR.roughnessMap, envMapIntensity: 0.35,
     }),
     grass: new THREE.MeshStandardMaterial({
       color: 0x86a06a, map: grassT.map, bumpMap: grassT.bump, bumpScale: 0.4, roughness: 1,
     }),
     metalDark: new THREE.MeshStandardMaterial({ color: 0x2b2b2d, metalness: 0.85, roughness: 0.42 }),
     metalWhite: new THREE.MeshStandardMaterial({ color: 0xf2f0ea, metalness: 0.35, roughness: 0.45 }),
-    chrome: new THREE.MeshStandardMaterial({ color: 0xe8e8ea, metalness: 0.95, roughness: 0.12, envMapIntensity: 1.8 }),
+    chrome: new THREE.MeshStandardMaterial({ color: 0xe4e7ec, metalness: 0.95, roughness: 0.13, envMapIntensity: 1.45 }),
     roof: new THREE.MeshStandardMaterial({ color: 0x4a4b4d, roughness: 0.9, metalness: 0.1 }),
-    concrete: new THREE.MeshStandardMaterial({ color: 0xb8b4ac, roughness: 0.92 }),
+    concrete: new THREE.MeshStandardMaterial({
+      color: 0xc8c4bc, map: rockPBR.map, normalMap: rockPBR.normalMap, normalScale: new THREE.Vector2(0.35, 0.35),
+      roughness: 1.0, roughnessMap: rockPBR.roughnessMap,
+    }),
     lampGlow: new THREE.MeshStandardMaterial({
-      color: 0xfff4de, emissive: 0xffe6bd, emissiveIntensity: 1.1, roughness: 0.4,
+      color: 0xfff4de, emissive: 0xffe6bd, emissiveIntensity: 0.95, roughness: 0.4,
     }),
     parkLampGlobe: new THREE.MeshStandardMaterial({
       color: 0xfff8ee, emissive: 0xfff0d0, emissiveIntensity: 0.25,
@@ -716,44 +888,47 @@ export function makeMaterials(env) {
 
     /* ==================== INTERIOR ==================== */
     marbleFloor: new THREE.MeshPhysicalMaterial({
-      color: 0xf4efe6, map: marbleT.map, bumpMap: marbleT.bump, bumpScale: 0.05,
-      roughness: 1.0, roughnessMap: marbleT.roughness, metalness: 0.02,
-      clearcoat: 0.55, clearcoatRoughness: 0.16, envMapIntensity: 0.92, side: THREE.DoubleSide,
+      color: 0xebe3d5, map: marblePBR.map, normalMap: marblePBR.normalMap, normalScale: new THREE.Vector2(0.22, 0.22),
+      roughness: 1.0, roughnessMap: marblePBR.roughnessMap, metalness: 0.02,
+      clearcoat: 0.45, clearcoatRoughness: 0.12, envMapIntensity: 1.35, side: THREE.DoubleSide,
     }),
     neroMarble: new THREE.MeshPhysicalMaterial({
-      color: 0xffffff, map: neroT.map, bumpMap: neroT.bump, bumpScale: 0.04,
-      roughness: 1.0, roughnessMap: neroT.roughness, metalness: 0.03,
-      clearcoat: 0.72, clearcoatRoughness: 0.12, envMapIntensity: 1.1, side: THREE.DoubleSide,
+      color: 0x242830, map: neroPBR.map, normalMap: neroPBR.normalMap, normalScale: new THREE.Vector2(0.28, 0.28),
+      roughness: 1.0, roughnessMap: neroPBR.roughnessMap, metalness: 0.03,
+      clearcoat: 0.68, clearcoatRoughness: 0.14, envMapIntensity: 1.05, side: THREE.DoubleSide,
     }),
     brushedSteel: new THREE.MeshStandardMaterial({
       color: 0xd8dce2, map: brushedT.map, bumpMap: brushedT.bump, bumpScale: 0.03,
-      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.92, envMapIntensity: 1.55,
+      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.92, envMapIntensity: 1.35,
     }),
     darkTitanium: new THREE.MeshStandardMaterial({
       color: 0x363b44, map: brushedT.map, bumpMap: brushedT.bump, bumpScale: 0.03,
-      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.88, envMapIntensity: 1.25,
+      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.88, envMapIntensity: 1.2,
     }),
     brushedBrass: new THREE.MeshStandardMaterial({
       color: 0xd9b366, map: brushedT.map, bumpMap: brushedT.bump, bumpScale: 0.025,
-      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.94, envMapIntensity: 1.65,
+      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.94, envMapIntensity: 1.45,
     }),
     oakLaminate: new THREE.MeshStandardMaterial({
-      color: 0xd8b684, map: oakLam.map, bumpMap: oakLam.bump, bumpScale: 0.16,
-      roughness: 0.38, metalness: 0, side: THREE.DoubleSide,
+      color: 0xffe4c4, map: oakFloorPBR.map, normalMap: oakFloorPBR.normalMap, normalScale: new THREE.Vector2(0.35, 0.35),
+      roughness: 1.0, roughnessMap: oakFloorPBR.roughnessMap, metalness: 0, envMapIntensity: 0.52, side: THREE.DoubleSide,
     }),
-    plasterWall: new THREE.MeshStandardMaterial({ color: 0xf5f6f8, roughness: 0.86, metalness: 0, envMapIntensity: 0.38, side: THREE.DoubleSide }),
+    plasterWall: new THREE.MeshStandardMaterial({
+      color: 0xe5e2da, normalMap: travPBR.normalMap, normalScale: new THREE.Vector2(0.10, 0.10),
+      roughness: 0.88, metalness: 0, envMapIntensity: 0.32, side: THREE.DoubleSide,
+    }),
     walnutDoor: new THREE.MeshStandardMaterial({
-      color: 0x8a5234, map: walnutT.map, bumpMap: walnutT.bump, bumpScale: 0.25,
-      roughness: 0.42, metalness: 0, envMapIntensity: 0.45,
+      color: 0xc89676, map: walnutDoorPBR.map, normalMap: walnutDoorPBR.normalMap, normalScale: new THREE.Vector2(0.42, 0.42),
+      roughness: 1.0, roughnessMap: walnutDoorPBR.roughnessMap, metalness: 0, envMapIntensity: 0.48,
     }),
     walnutSlat: new THREE.MeshStandardMaterial({
-      color: 0xffffff, map: walnutSlatT.map, bumpMap: walnutSlatT.bump, bumpScale: 0.35,
-      roughness: 0.44, metalness: 0, envMapIntensity: 0.48,
+      color: 0xffffff, map: walnutSlatT.map, normalMap: woodLightPBR.normalMap, normalScale: new THREE.Vector2(0.45, 0.45),
+      roughness: 1.0, roughnessMap: woodLightPBR.roughnessMap, metalness: 0, envMapIntensity: 0.48,
     }),
     frostedGlass: new THREE.MeshPhysicalMaterial({
-      color: 0xe8eef4, metalness: 0, roughness: 0.55, transparent: true, opacity: 0.42,
+      color: 0xe8eef4, metalness: 0, roughness: 0.52, transparent: true, opacity: 0.36,
       envMapIntensity: 0.5, side: THREE.DoubleSide, depthWrite: false,
-      clearcoat: 0.5, clearcoatRoughness: 0.4,
+      clearcoat: 0.5, clearcoatRoughness: 0.38,
     }),
     guardDesk: new THREE.MeshStandardMaterial({ color: 0xd4d8e0, roughness: 0.65, metalness: 0.05, envMapIntensity: 0.35 }),
     leatherBlack: new THREE.MeshStandardMaterial({
@@ -776,12 +951,13 @@ export function makeMaterials(env) {
       color: 0x35445c, map: fabricT.map, bumpMap: fabricT.bump, bumpScale: 0.18, roughness: 0.85, envMapIntensity: 0.25,
     }),
     woodLight: new THREE.MeshStandardMaterial({
-      color: 0xd8b886, map: wood.map, bumpMap: wood.bump, bumpScale: 0.15, roughness: 0.44, envMapIntensity: 0.35,
+      color: 0xffe8cb, map: woodLightPBR.map, normalMap: woodLightPBR.normalMap, normalScale: new THREE.Vector2(0.32, 0.32),
+      roughness: 1.0, roughnessMap: woodLightPBR.roughnessMap, envMapIntensity: 0.42,
     }),
     blind: new THREE.MeshStandardMaterial({ color: 0xede5d4, roughness: 0.88, envMapIntensity: 0.25, side: THREE.DoubleSide }),
-    ceiling: new THREE.MeshStandardMaterial({ color: 0xf4f6f9, map: ceil.map, roughness: 0.92, envMapIntensity: 0.28, side: THREE.DoubleSide }),
+    ceiling: new THREE.MeshStandardMaterial({ color: 0xe2e4e8, map: ceil.map, roughness: 0.92, envMapIntensity: 0.22, side: THREE.DoubleSide }),
     lampPanel: new THREE.MeshStandardMaterial({
-      color: 0xffffff, emissive: 0xfff8ea, emissiveIntensity: 1.5, roughness: 0.35,
+      color: 0xffffff, emissive: 0xfff8ea, emissiveIntensity: 1.15, roughness: 0.35,
     }),
     fireRed: new THREE.MeshStandardMaterial({ color: 0xcc2020, roughness: 0.75 }),
 
@@ -819,9 +995,9 @@ export function makeMaterials(env) {
 
   /* ---- Glass materials (MeshPhysicalMaterial) ---- */
   M.glass = new THREE.MeshPhysicalMaterial({
-    color: 0xcfe0e6, metalness: 0, roughness: 0.06, transparent: true, opacity: 0.28,
-    envMapIntensity: 1.6, side: THREE.DoubleSide, depthWrite: false,
-    clearcoat: 1, clearcoatRoughness: 0.04, reflectivity: 1,
+    color: 0xb6ccd6, metalness: 0.04, roughness: 0.04, transparent: true, opacity: 0.20,
+    envMapIntensity: 1.15, side: THREE.DoubleSide, depthWrite: false,
+    clearcoat: 1, clearcoatRoughness: 0.03, ior: 1.52, reflectivity: 0.92,
   });
   M.glassTint = new THREE.MeshPhysicalMaterial({
     color: 0x6a8898, metalness: 0.2, roughness: 0.05, transparent: true, opacity: 0.55,
@@ -900,7 +1076,8 @@ export function updateCachedMaterialsEnv(envTex) {
 }
 
 /* Build annular rotunda floor/ceiling ring, cutting the 20°..160° and 200°..340°
-   grand staircase wells (r = 4.55..6.65) when cutStairwell is true. */
+   grand staircase wells (r = 4.48..6.72) when cutStairwell is true.
+   Ceilings cut slightly wider (16°..164° and 196°..344°) for generous >2.4m headroom. */
 export function addRotundaRing(batch, mat, rIn, rOut, y, faceDown = false, cutStairwell = false) {
   const rx = faceDown ? Math.PI / 2 : -Math.PI / 2;
   const addArc = (ri, ro, seg, thetaStart, thetaLength) => {
@@ -912,18 +1089,19 @@ export function addRotundaRing(batch, mat, rIn, rOut, y, faceDown = false, cutSt
     addArc(rIn, rOut, 72, 0, Math.PI * 2);
     return;
   }
-  const rStairIn = 4.55;
-  const rStairOut = 6.65;
+  const rStairIn = 4.48;
+  const rStairOut = 6.72;
   if (rIn < rStairIn) addArc(rIn, Math.min(rOut, rStairIn), 64, 0, Math.PI * 2);
   if (rOut > rStairOut) addArc(Math.max(rIn, rStairOut), rOut, 64, 0, Math.PI * 2);
   const bandIn = Math.max(rIn, rStairIn);
   const bandOut = Math.min(rOut, rStairOut);
   if (bandOut > bandIn) {
-    // North landing (az 340°..20°) & South landing (az 160°..200°)
-    const northStart = faceDown ? 250 * DEG : 70 * DEG;
-    const southStart = faceDown ? 70 * DEG : 250 * DEG;
-    addArc(bandIn, bandOut, 16, northStart, 40 * DEG);
-    addArc(bandIn, bandOut, 16, southStart, 40 * DEG);
+    // North landing (az 340°..20° floor, 344°..16° ceiling) & South landing (az 160°..200° floor, 164°..196° ceiling)
+    const span = faceDown ? 32 * DEG : 40 * DEG;
+    const northStart = faceDown ? 254 * DEG : 70 * DEG;
+    const southStart = faceDown ? 74 * DEG : 250 * DEG;
+    addArc(bandIn, bandOut, 16, northStart, span);
+    addArc(bandIn, bandOut, 16, southStart, span);
   }
 }
 

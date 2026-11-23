@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import {
-  TIME_MODES, createSky, sunDirection, makeMaterials, updateCachedMaterialsEnv, PODIUM,
+  TIME_MODES, createSky, sunDirection, makeMaterials, updateCachedMaterialsEnv, PODIUM, LAYOUT, loadHDR,
 } from './core.js';
 import { buildBuilding, buildInteriorShell } from './building.js';
 import { buildInteriors } from './interior.js';
@@ -19,6 +19,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { N8AOPass } from '../vendor/n8ao/N8AO.js';
 
 const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const isMobile = window.innerWidth <= 640 || /iPhone|Android|Mobile/i.test(navigator.userAgent);
@@ -50,6 +51,82 @@ const envScene = new THREE.Scene();
 const envSky = createSky();
 envScene.add(envSky.mesh);
 let currentEnvRT = null;
+let outdoorHdrRT = null;
+let indoorHdrRT = null;
+let indoorProbeRT = null;
+let lastIndoor = false;
+
+const cubeRT = new THREE.WebGLCubeRenderTarget(256, {
+  generateMipmaps: true,
+  minFilter: THREE.LinearMipmapLinearFilter,
+  type: THREE.HalfFloatType,
+});
+const indoorCubeCam = new THREE.CubeCamera(0.2, 120, cubeRT);
+indoorCubeCam.position.set(0, PODIUM + 2.2, 4.2);
+
+const _wingSin = Math.sin(LAYOUT.wing.az);
+const _wingCos = Math.cos(LAYOUT.wing.az);
+function isCameraIndoors(pos) {
+  if (!pos) return false;
+  const { x, y, z } = pos;
+  if (y < PODIUM - 0.5 || y > PODIUM + 16.5) return false;
+  const r = Math.hypot(x, z);
+  if (r <= 10.8) return true;
+  if (r <= 18.6 && z > -2 && y <= PODIUM + 4.8) return true;
+  const B = LAYOUT.block;
+  if (x >= B.x0 - 0.4 && x <= B.x1 + 0.4 && z >= B.z0 - 0.4 && z <= B.z1 + 0.4) return true;
+  const s = x * _wingSin - z * _wingCos;
+  const t = x * _wingCos + z * _wingSin;
+  const W = LAYOUT.wing;
+  return s >= W.s0 - 0.4 && s <= W.s1 + 0.4 && Math.abs(t) <= W.half + 0.4;
+}
+
+function setMaterialsEnv(envTex) {
+  scene.environment = envTex;
+  for (const k of Object.keys(M)) {
+    if (M[k] && (M[k].isMeshStandardMaterial || M[k].isMeshPhysicalMaterial)) {
+      M[k].envMap = envTex;
+    }
+  }
+  updateCachedMaterialsEnv(envTex);
+}
+
+function applyEnvironment() {
+  const indoor = isCameraIndoors(camera.position);
+  lastIndoor = indoor;
+  const mode = TIME_MODES[timeKey || 'day'];
+  const isNight = !!mode.night;
+  const isGolden = timeKey === 'golden';
+  let envTex = currentEnvRT ? currentEnvRT.texture : null;
+  if (indoor) {
+    envTex = indoorProbeRT ? indoorProbeRT.texture : (indoorHdrRT ? indoorHdrRT.texture : envTex);
+  } else if (timeKey === 'day' && outdoorHdrRT) {
+    envTex = outdoorHdrRT.texture;
+  }
+  if ('environmentIntensity' in scene) {
+    scene.environmentIntensity = indoor ? (isNight ? 0.45 : 0.72) : 1.0;
+  }
+  if (typeof hemiLight !== 'undefined') {
+    hemiLight.intensity = indoor ? (isNight ? 0.14 : isGolden ? 0.18 : 0.26) : mode.ambI;
+  }
+  if (typeof n8aoPass !== 'undefined') {
+    n8aoPass.configuration.intensity = indoor ? 2.9 : 2.5;
+  }
+  if (envTex) setMaterialsEnv(envTex);
+}
+
+function captureIndoorProbe() {
+  const probeBase = indoorHdrRT ? indoorHdrRT.texture : (currentEnvRT ? currentEnvRT.texture : null);
+  const prevCharVis = character.root.visible;
+  character.root.visible = false;
+  if (probeBase) setMaterialsEnv(probeBase);
+  indoorCubeCam.update(renderer, scene);
+  const nextProbe = pmrem.fromCubemap(cubeRT.texture);
+  if (indoorProbeRT) indoorProbeRT.dispose();
+  indoorProbeRT = nextProbe;
+  character.root.visible = prevCharVis;
+  applyEnvironment();
+}
 
 function rebuildEnv(mode) {
   const sdir = sunDirection(mode);
@@ -122,13 +199,25 @@ const interiorUpdate = (interior && typeof interior.update === 'function') ? int
 
 /* --------------------------------------------------------- postprocessing */
 const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
+const renderPass = new RenderPass(scene, camera);
+composer.addPass(renderPass);
+
+const n8aoPass = new N8AOPass(scene, camera, window.innerWidth, window.innerHeight);
+n8aoPass.configuration.aoRadius = 1.6;
+n8aoPass.configuration.distanceFalloff = 0.8;
+n8aoPass.configuration.intensity = 2.6;
+n8aoPass.configuration.halfRes = false;
+n8aoPass.configuration.aoSamples = 16;
+n8aoPass.configuration.denoiseSamples = 8;
+n8aoPass.configuration.denoiseRadius = 8;
+n8aoPass.configuration.gammaCorrection = false;
+composer.addPass(n8aoPass);
 
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.22,   // strength — subtle, only on emissives
-  0.4,    // radius
-  0.92    // threshold — high, so only lamps/screens bloom
+  0.22,   // strength — subtle, only on bright emissives
+  0.55,   // softer radius
+  1.05    // threshold — avoid sunlit white/glass blowout
 );
 composer.addPass(bloomPass);
 
@@ -150,6 +239,11 @@ function setQuality(q) {
   composer.setSize(window.innerWidth, window.innerHeight);
   composer.setPixelRatio(dpr);
 
+  n8aoPass.enabled = q !== 'low';
+  n8aoPass.configuration.halfRes = q === 'med';
+  n8aoPass.configuration.aoSamples = q === 'high' ? 16 : 12;
+  renderPass.enabled = !n8aoPass.enabled;
+
   bloomPass.resolution.set(Math.round(window.innerWidth * dpr), Math.round(window.innerHeight * dpr));
 
   const shadowRes = q === 'high' ? 2048 : q === 'med' ? 1024 : 512;
@@ -170,13 +264,7 @@ function setTime(key) {
   if (!mode) return;
   const skipEnv = (timeKey === null && key === 'day' && currentEnvRT);
   timeKey = key;
-  const envTex = skipEnv ? currentEnvRT.texture : rebuildEnv(mode);
-  for (const k of Object.keys(M)) {
-    if (M[k] && (M[k].isMeshStandardMaterial || M[k].isMeshPhysicalMaterial)) {
-      M[k].envMap = envTex;
-    }
-  }
-  updateCachedMaterialsEnv(envTex);
+  if (!skipEnv) rebuildEnv(mode);
   const sdir = sunDirection(mode);
   sunLight.position.copy(sdir).multiplyScalar(135);
   sunLight.color.setHex(mode.sun);
@@ -185,6 +273,7 @@ function setTime(key) {
   hemiLight.color.setHex(mode.amb);
   hemiLight.groundColor.setHex(mode.ground);
   hemiLight.intensity = mode.ambI;
+  applyEnvironment();
 
   scene.fog.color.setHex(mode.fog);
   scene.fog.density = mode.fogD;
@@ -201,16 +290,16 @@ function setTime(key) {
   const intPower = isNight ? 18 : isGolden ? 14 : 12;
   for (const l of interiorLights) {
     l.intensity = intPower * (l.userData.weight ?? 0.40);
-    l.distance = l.userData.dist ?? 22;
-    l.decay = 1.35;
+    l.distance = l.userData.dist ?? 20;
+    l.decay = 1.6;
   }
 
-  if (M.lampGlow) M.lampGlow.emissiveIntensity = isNight ? 2.6 : isGolden ? 1.6 : 1.2;
-  if (M.parkLampGlobe) M.parkLampGlobe.emissiveIntensity = isNight ? 2.8 : isGolden ? 1.4 : 0.25;
-  if (M.lampPanel) M.lampPanel.emissiveIntensity = isNight ? 3.2 : 2.6;
+  if (M.lampGlow) M.lampGlow.emissiveIntensity = isNight ? 1.85 : isGolden ? 1.25 : 0.95;
+  if (M.parkLampGlobe) M.parkLampGlobe.emissiveIntensity = isNight ? 1.9 : isGolden ? 1.15 : 0.25;
+  if (M.lampPanel) M.lampPanel.emissiveIntensity = isNight ? 1.55 : 1.12;
 
-  // Adjust bloom for night
-  bloomPass.strength = isNight ? 0.35 : isGolden ? 0.26 : 0.22;
+  // Adjust bloom for time of day
+  bloomPass.strength = isNight ? 0.30 : isGolden ? 0.25 : 0.22;
 
   syncUI();
 }
@@ -341,6 +430,23 @@ window.addEventListener('resize', onResize);
 setQuality(quality);
 setTime('day');
 
+// Async dual PMREM HDRI loading + indoor CubeCamera probe capture
+loadHDR('./assets/hdri/kloofendal_48d_partly_cloudy_puresky_1k.hdr', pmrem)
+  .then((hdr) => {
+    outdoorHdrRT = hdr.renderTarget;
+    applyEnvironment();
+  })
+  .catch(() => {});
+
+const interiorReady = (interiorGroup && interiorGroup.userData && interiorGroup.userData.ready) || Promise.resolve();
+Promise.all([
+  loadHDR('./assets/hdri/newman_lobby_1k.hdr', pmrem).catch(() => null),
+  interiorReady,
+]).then(([hdr]) => {
+  if (hdr) indoorHdrRT = hdr.renderTarget;
+  captureIndoorProbe();
+});
+
 /* -------------------------------------------------------------------- loop */
 const flagMeshes = [];
 if (flagGroup) {
@@ -362,6 +468,9 @@ function animate(now) {
   elapsed += dt;
 
   controller.update(dt);
+
+  const nowIndoor = isCameraIndoors(camera.position);
+  if (nowIndoor !== lastIndoor) applyEnvironment();
 
   // Interior update (pass player position for proximity interactions)
   if (interiorUpdate) {

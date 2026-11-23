@@ -31,8 +31,8 @@ export const VIEWPOINTS = {
   },
   lobby: {
     label: 'Холл',
-    pos: [0.9, PODIUM + 1.82, 13.1],
-    target: [-0.9, PODIUM + 1.60, 5.0],
+    pos: [2.2, PODIUM + 1.85, 14.4],
+    target: [-1.4, PODIUM + 1.55, 7.6],
   },
   lift: {
     label: 'Лифт',
@@ -196,7 +196,7 @@ export function createController(camera, domElement, colliders, character, opts 
       } else if (c.type === 'arcStair') {
         // Semicircular grand stair: test if player is within the arc sector
         const r = Math.hypot(x - c.cx, z - c.cz);
-        if (r >= c.rInner && r <= c.rOuter) {
+        if (r >= c.rInner - 0.14 && r <= c.rOuter + 0.14) {
           let angle = Math.atan2(x - c.cx, -(z - c.cz));
           if (angle < 0) angle += Math.PI * 2;
           // Normalize a0, a1 to [0, 2pi]
@@ -221,7 +221,7 @@ export function createController(camera, domElement, colliders, character, opts 
             }
             progress = clamp(progress, 0, 1);
             const stairY = c.y0 + progress * (c.y1 - c.y0);
-            if (stairY <= curY + 0.85 && curY >= c.y0 - 0.5 && curY <= c.y1 + 0.5) {
+            if (stairY <= curY + 0.95 && curY >= c.y0 - 0.6 && curY <= c.y1 + 0.6) {
               h = Math.max(h, stairY);
             }
           }
@@ -233,19 +233,19 @@ export function createController(camera, domElement, colliders, character, opts 
     const rCenter = Math.hypot(x, z);
     let rotAng = Math.atan2(x, -z) * 180 / Math.PI;
     if (rotAng < 0) rotAng += 360;
-    const inStairWell = rCenter >= 4.55 && rCenter <= 6.65 &&
+    const inStairWell = rCenter >= 4.48 && rCenter <= 6.72 &&
       ((rotAng >= 20 && rotAng <= 160) || (rotAng >= 200 && rotAng <= 340));
     if (rCenter >= LAYOUT.rotunda.core && rCenter <= LAYOUT.rotunda.hall && !inStairWell) {
-      for (const lv of [3.6, 7.2]) {
+      for (const lv of [3.6, 7.2, 10.8]) {
         const fy = PODIUM + lv;
         if (curY >= fy - 0.55) h = Math.max(h, fy);
       }
     }
 
-    // Block wing floors (only active levels 0, 1, 2 — exclude non-existent FLOOR[3])
+    // Block wing floors (levels 0, 1, 2, 3)
     const B = LAYOUT.block;
     if (x >= B.x0 && x <= B.x1 && z >= B.z0 && z <= B.z1) {
-      for (const lv of [0, 3.6, 7.2]) {
+      for (const lv of [0, 3.6, 7.2, 10.8]) {
         const fy = PODIUM + lv;
         if (curY >= fy - 0.55) h = Math.max(h, fy);
       }
@@ -253,20 +253,20 @@ export function createController(camera, domElement, colliders, character, opts 
 
     // Block-to-rotunda corridor threshold bridge (closes x = -9.4..-8.55 gap)
     if (x >= -9.5 && x <= -8.1 && z >= -2.3 && z <= 1.3) {
-      for (const lv of [0, 3.6, 7.2]) {
+      for (const lv of [0, 3.6, 7.2, 10.8]) {
         const fy = PODIUM + lv;
         if (curY >= fy - 0.55) h = Math.max(h, fy);
       }
     }
 
-    // Wing floors (only active levels 0, 1, 2 — exclude non-existent FLOOR[3])
+    // Wing floors (levels 0, 1, 2, 3)
     const W = LAYOUT.wing;
     const wa = W.az, wax = Math.sin(wa), waz = -Math.cos(wa);
     const wnx = Math.cos(wa), wnz = Math.sin(wa);
     const ws = x * wax + z * waz; // along axis
     const wt = Math.abs(x * wnx + z * wnz); // across axis
     if (ws >= W.s0 && ws <= W.s1 && wt <= W.half) {
-      for (const lv of [0, 3.6, 7.2]) {
+      for (const lv of [0, 3.6, 7.2, 10.8]) {
         const fy = PODIUM + lv;
         if (curY >= fy - 0.55) h = Math.max(h, fy);
       }
@@ -377,6 +377,43 @@ export function createController(camera, domElement, colliders, character, opts 
         }
       }
     }
+
+    // Keep player inside stair channel and behind upper-floor stairwell glass guardrails
+    const rotR = Math.hypot(px, pz);
+    if (rotR > 3.8 && rotR < 7.4) {
+      let rotDeg = Math.atan2(px, -pz) * 180 / Math.PI;
+      if (rotDeg < 0) rotDeg += 360;
+      const inWellArc = (rotDeg > 23 && rotDeg < 157) || (rotDeg > 203 && rotDeg < 337);
+      if (inWellArc) {
+        let onFlight = false;
+        for (const c of colliders) {
+          if (c.type !== 'arcStair') continue;
+          const a0 = ((c.a0 % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+          const a1 = ((c.a1 % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+          const ang = rotDeg * Math.PI / 180;
+          if (ang >= a0 && ang <= a1) {
+            const sy = c.y0 + ((ang - a0) / (a1 - a0)) * (c.y1 - c.y0);
+            if (Math.abs(feetY - sy) < 1.15 && rotR >= c.rInner - 0.15 && rotR <= c.rOuter + 0.15) {
+              onFlight = true;
+              break;
+            }
+          }
+        }
+        let targetR = rotR;
+        if (onFlight) {
+          targetR = clamp(rotR, 4.65 + BODY_RADIUS, 6.55 - BODY_RADIUS);
+        } else if (feetY >= PODIUM + 2.8) {
+          if (rotR > 4.48 - BODY_RADIUS && rotR < 5.60) targetR = 4.48 - BODY_RADIUS;
+          else if (rotR >= 5.60 && rotR < 6.72 + BODY_RADIUS) targetR = 6.72 + BODY_RADIUS;
+        }
+        if (targetR !== rotR && rotR > 1e-4) {
+          const k = targetR / rotR;
+          px *= k;
+          pz *= k;
+        }
+      }
+    }
+
     pos.x = px;
     pos.z = pz;
   }

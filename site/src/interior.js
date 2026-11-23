@@ -7,7 +7,34 @@
    .userData.lights and an .update(dt, playerPos) for animated turnstiles & lift doors. */
 
 import * as THREE from 'three';
-import { Batch, DEG, LAYOUT, FLOOR, PODIUM, polar, mulberry32, clamp, cachedMaterial, addRotundaRing } from './core.js';
+import {
+  Batch, DEG, LAYOUT, FLOOR, PODIUM, polar, mulberry32, clamp, cachedMaterial, addRotundaRing,
+  cloneGLB, loadGLB, prepareModel,
+} from './core.js';
+
+let _interiorGroup = null;
+let _interiorPending = [];
+
+function placeAsyncGLB(parentMatrix, url, x, y, z, ry = 0, opts = {}) {
+  if (!_interiorGroup) return Promise.resolve(null);
+  const anchor = new THREE.Group();
+  const localM = new THREE.Matrix4().compose(
+    new THREE.Vector3(x, y, z),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(0, ry, 0)),
+    new THREE.Vector3(1, 1, 1)
+  );
+  if (parentMatrix) localM.premultiply(parentMatrix);
+  localM.decompose(anchor.position, anchor.quaternion, anchor.scale);
+  _interiorGroup.add(anchor);
+  const p = cloneGLB(url, opts)
+    .then((model) => {
+      anchor.add(model);
+      return model;
+    })
+    .catch(() => null);
+  _interiorPending.push(p);
+  return p;
+}
 
 const B = LAYOUT.block;
 const W = LAYOUT.wing;
@@ -104,124 +131,52 @@ function conferenceChair(batch, M, x, y, z, ry) {
   batch.setParent(prev);
 }
 
-function addAODisc(batch, M, x, y, z, sx, sz, ry = 0) {
-  if (!M.aoShadow) return;
-  batch.plane(M.aoShadow, sx, sz, x, y, z, ry, -Math.PI / 2);
+function sofa(batch, M, x, y, z, ry) {
+  placeAsyncGLB(batch.parent, './assets/models/sofa_03.glb', x, y, z, ry, {
+    targetHeight: 0.86,
+    groundY: 0,
+    centerXZ: true,
+    envMapIntensity: 0.55,
+    onMesh(obj) {
+      if (obj.material && obj.material.name && obj.material.name.includes('fringe')) {
+        obj.material.alphaTest = 0.35;
+        obj.material.side = THREE.DoubleSide;
+        obj.material.roughness = 0.85;
+      }
+    },
+  });
 }
 
-function sofa(batch, M, x, y, z, ry, leatherKey = 'leatherCognac') {
-  const m4 = new THREE.Matrix4().compose(
-    new THREE.Vector3(x, y, z),
-    new THREE.Quaternion().setFromEuler(new THREE.Euler(0, ry, 0)),
-    new THREE.Vector3(1, 1, 1));
-  const prev = pushParent(batch, m4);
-  const leatherMat = mat(M, leatherKey, 'leatherBlack', 'fabric');
-  const trimMat = mat(M, 'leatherEspresso', 'leatherBlack');
-  const legMat = mat(M, 'brushedSteel', 'chrome', 'metalDark');
+function armchair(batch, x, y, z, ry) {
+  placeAsyncGLB(batch.parent, './assets/models/armchair_01.glb', x, y, z, ry, {
+    targetHeight: 0.84,
+    groundY: 0,
+    centerXZ: true,
+    envMapIntensity: 0.55,
+  });
+}
 
-  addAODisc(batch, M, 0, 0.004, 0, 2.35, 1.18);
-  // Brushed-steel sled legs
-  for (const sx of [-0.88, 0.88]) {
-    batch.cyl(legMat, 0.018, 0.015, 0.14, 10, sx, 0.07, -0.34);
-    batch.cyl(legMat, 0.018, 0.015, 0.14, 10, sx, 0.07, 0.34);
-    batch.box(legMat, 0.032, 0.024, 0.72, sx, 0.02, 0);
-  }
-  // Upholstered lower plinth deck + piping seam
-  batch.box(trimMat, 1.98, 0.16, 0.84, 0, 0.21, 0);
-  batch.box(leatherMat, 2.00, 0.025, 0.86, 0, 0.295, 0);
-  // Two plush tufted seat cushions with stitched bolster seams
-  for (const s of [-1, 1]) {
-    const cx = s * 0.44;
-    batch.box(leatherMat, 0.84, 0.13, 0.68, cx, 0.37, 0.06);
-    batch.box(trimMat, 0.85, 0.016, 0.69, cx, 0.32, 0.06);
-    // Subtle tufting dimples/buttons
-    for (const bx of [-0.18, 0.18]) {
-      batch.cyl(trimMat, 0.014, 0.014, 0.015, 8, cx + bx, 0.435, 0.06);
-    }
-    // Tailored backrest cushion with button tuft
-    batch.box(leatherMat, 0.84, 0.44, 0.16, cx, 0.61, -0.26, 0, -0.14);
-    for (const bx of [-0.16, 0.16]) {
-      const tuftGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.02, 8);
-      tuftGeo.rotateX(Math.PI / 2);
-      batch.add(tuftGeo, trimMat, new THREE.Matrix4().makeTranslation(cx + bx, 0.63, -0.18));
-    }
-  }
-  // Outer structured backrest shell
-  batch.box(trimMat, 2.00, 0.56, 0.14, 0, 0.56, -0.36);
-  // Tailored padded armrests with top piping
-  for (const s of [-1, 1]) {
-    batch.box(leatherMat, 0.18, 0.42, 0.84, s * 0.92, 0.46, 0);
-    batch.box(trimMat, 0.19, 0.03, 0.85, s * 0.92, 0.66, 0);
-    // Accent bolster pillow tucked inside arm
-    batch.box(mat(M, 'fabric', 'leatherBlack'), 0.11, 0.28, 0.34, s * 0.76, 0.54, -0.06, 0, 0, s * 0.22);
-  }
-  batch.setParent(prev);
+function coffeeTable(batch, x, y, z, ry) {
+  placeAsyncGLB(batch.parent, './assets/models/coffeetable_01.glb', x, y, z, ry, {
+    targetHeight: 0.44,
+    groundY: 0,
+    centerXZ: true,
+    envMapIntensity: 0.65,
+  });
 }
 
 function plant(batch, M, x, y, z, s = 1) {
-  const potMat = cachedMaterial({ color: 0x2a2f36, roughness: 0.26, metalness: 0.15, envMapIntensity: 0.85 });
-  const soilMat = cachedMaterial({ color: 0x2c221b, roughness: 0.95 });
-  const trunkMat = cachedMaterial({ color: 0x5c4636, roughness: 0.86 });
-  const leafDark = cachedMaterial({ color: 0x2c5630, roughness: 0.62, side: THREE.DoubleSide });
-  const leafFresh = cachedMaterial({ color: 0x3d733c, roughness: 0.56, side: THREE.DoubleSide });
-
-  addAODisc(batch, M, x, y + 0.004, z, 0.68 * s, 0.68 * s);
-  // Sculpted glazed ceramic architectural planter (Lathe profile)
-  const potPts = [
-    new THREE.Vector2(0.01, 0),
-    new THREE.Vector2(0.17 * s, 0),
-    new THREE.Vector2(0.24 * s, 0.18 * s),
-    new THREE.Vector2(0.26 * s, 0.42 * s),
-    new THREE.Vector2(0.25 * s, 0.48 * s),
-    new THREE.Vector2(0.22 * s, 0.48 * s),
-    new THREE.Vector2(0.21 * s, 0.41 * s),
-  ];
-  const potGeo = new THREE.LatheGeometry(potPts, 18);
-  batch.add(potGeo, potMat, new THREE.Matrix4().makeTranslation(x, y, z));
-  batch.cyl(soilMat, 0.21 * s, 0.20 * s, 0.04 * s, 14, x, y + 0.41 * s, z);
-
-  // 3 multi-stem woody ficus trunks with organic branch foliage clusters
-  const stems = [
-    { ox: -0.04 * s, oz: 0.03 * s, h: 0.72 * s, tiltX: 0.14, tiltZ: 0.12 },
-    { ox: 0.05 * s, oz: -0.02 * s, h: 0.86 * s, tiltX: -0.10, tiltZ: -0.14 },
-    { ox: 0.0, oz: -0.04 * s, h: 0.64 * s, tiltX: -0.16, tiltZ: 0.08 },
-  ];
-  for (let si = 0; si < stems.length; si++) {
-    const st = stems[si];
-    const mStem = new THREE.Matrix4().compose(
-      new THREE.Vector3(x + st.ox, y + 0.40 * s + st.h * 0.42, z + st.oz),
-      new THREE.Quaternion().setFromEuler(new THREE.Euler(st.tiltX, si * 2.1, st.tiltZ)),
-      new THREE.Vector3(1, 1, 1)
-    );
-    batch.add(new THREE.CylinderGeometry(0.015 * s, 0.026 * s, st.h, 8), trunkMat, mStem);
-
-    // Clustered botanical foliage sprays along upper canopy
-    const topX = x + st.ox + Math.sin(st.tiltZ) * st.h * 0.45;
-    const topY = y + 0.40 * s + st.h * 0.88;
-    const topZ = z + st.oz + Math.sin(st.tiltX) * st.h * 0.45;
-    for (let li = 0; li < 9; li++) {
-      const a = (li / 9) * Math.PI * 2 + si * 0.7;
-      const tier = (li % 3) * 0.12 * s;
-      const rad = (0.10 + (li % 2) * 0.07) * s;
-      const lx = topX + Math.cos(a) * rad;
-      const ly = topY + tier - 0.10 * s;
-      const lz = topZ + Math.sin(a) * rad;
-      const lMat = li % 2 === 0 ? leafDark : leafFresh;
-      const leafGeo = new THREE.SphereGeometry(0.11 * s, 7, 5);
-      const lm = new THREE.Matrix4().compose(
-        new THREE.Vector3(lx, ly, lz),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler(0.45, a, 0.2)),
-        new THREE.Vector3(1.15, 0.38, 0.78)
-      );
-      batch.add(leafGeo, lMat, lm);
-    }
-  }
+  placeAsyncGLB(batch.parent, './assets/models/potted_plant_04.glb', x, y, z, 0, {
+    targetHeight: 0.96 * s,
+    groundY: 0,
+    centerXZ: true,
+    envMapIntensity: 0.45,
+  });
 }
 
 function lobbyBin(batch, M, x, y, z) {
   const steelMat = mat(M, 'brushedSteel', 'chrome');
   const darkMat = mat(M, 'darkTitanium', 'metalDark');
-  addAODisc(batch, M, x, y + 0.004, z, 0.48, 0.48);
   batch.cyl(darkMat, 0.175, 0.18, 0.03, 18, x, y + 0.015, z);
   batch.cyl(steelMat, 0.165, 0.165, 0.64, 20, x, y + 0.35, z);
   const rim = new THREE.TorusGeometry(0.158, 0.014, 8, 20);
@@ -233,7 +188,7 @@ function lobbyBin(batch, M, x, y, z) {
 function exitSign(batch, M, x, y, z, ry = 0) {
   const tex = makeExitSignTex();
   const signMat = cachedMaterial({
-    map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 1.3,
+    map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.95,
     roughness: 0.4, toneMapped: false,
   });
   const m4 = new THREE.Matrix4().compose(
@@ -1007,6 +962,46 @@ function makeBadgeTex() {
   });
 }
 
+function makeFaceIDTerminalTex() {
+  return cachedProcTex('faceIdTerminalTex', 192, 288, (x, w, h) => {
+    const g = x.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, '#071422');
+    g.addColorStop(1, '#0c233a');
+    x.fillStyle = g;
+    x.fillRect(0, 0, w, h);
+    x.strokeStyle = 'rgba(56,216,255,0.45)';
+    x.lineWidth = 4;
+    x.strokeRect(8, 8, w - 16, h - 16);
+    // Camera lens ring at top
+    x.fillStyle = '#05080d';
+    x.beginPath(); x.arc(w / 2, 26, 10, 0, Math.PI * 2); x.fill();
+    x.fillStyle = '#2288ff';
+    x.beginPath(); x.arc(w / 2, 26, 4, 0, Math.PI * 2); x.fill();
+    // Face scan reticle
+    x.strokeStyle = '#00f0ff';
+    x.lineWidth = 4;
+    const rx = 44, ry = 56, rw = w - 88, rh = 110, c = 18;
+    for (const [cx, cy, sx, sy] of [
+      [rx, ry, 1, 1], [rx + rw, ry, -1, 1], [rx, ry + rh, 1, -1], [rx + rw, ry + rh, -1, -1],
+    ]) {
+      x.beginPath();
+      x.moveTo(cx + sx * c, cy); x.lineTo(cx, cy); x.lineTo(cx, cy + sy * c);
+      x.stroke();
+    }
+    x.fillStyle = 'rgba(0,224,255,0.18)';
+    x.beginPath(); x.arc(w / 2, 104, 24, 0, Math.PI * 2); x.fill();
+    x.beginPath(); x.arc(w / 2, 152, 34, Math.PI, Math.PI * 2); x.fill();
+    // Status banner
+    x.fillStyle = '#00e68a';
+    x.font = '700 22px "Segoe UI", Arial';
+    x.textAlign = 'center';
+    x.fillText('СКУД · FACE ID', w / 2, 212);
+    x.fillStyle = '#9cd8ff';
+    x.font = '600 16px "Segoe UI", Arial';
+    x.fillText('КАРТА / ПРОПУСК', w / 2, 244);
+  });
+}
+
 /* ============================================================ TURNSTILES */
 function buildTurnstiles(scene, y, M, colliders) {
   const group = new THREE.Group();
@@ -1022,52 +1017,43 @@ function buildTurnstiles(scene, y, M, colliders) {
   const steelMat = mat(M, 'brushedSteel', 'chrome');
   const titanMat = mat(M, 'darkTitanium', 'metalDark');
   const chromeMat = mat(M, 'chrome', 'brushedSteel');
-  const rubberMat = cachedMaterial({ color: 0x16181d, roughness: 0.9, metalness: 0.05 });
-  const obsidianMat = cachedMaterial({
-    type: 'physical', color: 0x0b0e14, roughness: 0.05, metalness: 0.18,
-    clearcoat: 1, clearcoatRoughness: 0.04, envMapIntensity: 1.9,
-  });
   const glassWingMat = cachedMaterial({
-    type: 'physical', color: 0xdff0f8, transparent: true, opacity: 0.24,
-    roughness: 0.04, metalness: 0.06, clearcoat: 1, clearcoatRoughness: 0.03,
-    envMapIntensity: 1.7, side: THREE.DoubleSide, depthWrite: false,
+    type: 'physical', color: 0xe6f7ff, transparent: true, opacity: 0.16,
+    roughness: 0.02, metalness: 0.02, ior: 1.52, reflectivity: 0.96,
+    clearcoat: 1.0, clearcoatRoughness: 0.02, envMapIntensity: 1.45,
+    side: THREE.DoubleSide, depthWrite: false,
   });
   const stripeTex = makeGlassStripeTextures();
   const glassStripeMat = new THREE.MeshStandardMaterial({
     color: 0xffffff, map: stripeTex.map, alphaMap: stripeTex.alphaMap,
-    transparent: true, roughness: 0.65, metalness: 0.05,
+    transparent: true, opacity: 0.24, roughness: 0.4, metalness: 0.05,
     side: THREE.DoubleSide, depthWrite: false,
   });
   const readerTex = makeTurnstileReaderTex();
   const readerMat = new THREE.MeshStandardMaterial({
-    map: readerTex, emissive: 0xffffff, emissiveMap: readerTex, emissiveIntensity: 0.85,
+    map: readerTex, emissive: 0xffffff, emissiveMap: readerTex, emissiveIntensity: 0.72,
     roughness: 0.25, metalness: 0.1,
+  });
+  const faceIdTex = makeFaceIDTerminalTex();
+  const faceIdMat = new THREE.MeshStandardMaterial({
+    map: faceIdTex, emissive: 0xffffff, emissiveMap: faceIdTex, emissiveIntensity: 0.68,
+    roughness: 0.22, metalness: 0.05,
   });
   const arrowIdleTex = makeTurnstileArrowTex(false);
   const arrowActiveTex = makeTurnstileArrowTex(true);
+  const ledStripIdleMat = cachedMaterial({ color: 0x00e68a, emissive: 0x00c878, emissiveIntensity: 0.7, roughness: 0.3 });
   const lensMat = cachedMaterial({ color: 0x080a0f, roughness: 0.1, metalness: 0.3, envMapIntensity: 1.4 });
-  const aoMat = M.aoShadow;
 
-  // Shared geometries across all 4 cabinets (low draw call & memory)
-  const aoGeo = new THREE.PlaneGeometry(0.56, 1.68);
-  aoGeo.rotateX(-Math.PI / 2);
-  const gasketGeo = new THREE.BoxGeometry(0.22, 0.018, 1.38);
-  const basePlateGeo = new THREE.BoxGeometry(0.21, 0.022, 1.36);
-  const boltGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.012, 6);
-  const bodyCoreGeo = new THREE.BoxGeometry(0.184, 0.86, 0.96);
-  const noseCylGeo = new THREE.CylinderGeometry(0.092, 0.092, 0.86, 20);
-  const seamGeo = new THREE.BoxGeometry(0.188, 0.84, 0.014);
-  const skirtRevealGeo = new THREE.BoxGeometry(0.188, 0.024, 0.98);
-  const lidTrimCoreGeo = new THREE.BoxGeometry(0.19, 0.018, 0.96);
-  const lidTrimCylGeo = new THREE.CylinderGeometry(0.095, 0.095, 0.018, 20);
-  const lidCoreGeo = new THREE.BoxGeometry(0.18, 0.026, 0.96);
-  const lidCylGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.026, 20);
-  const readerPadGeo = new THREE.PlaneGeometry(0.125, 0.125);
+  const readerPadGeo = new THREE.PlaneGeometry(0.115, 0.115);
   readerPadGeo.rotateX(-Math.PI / 2);
-  const bezelHousingGeo = new THREE.BoxGeometry(0.115, 0.072, 0.028);
-  const indicatorGeo = new THREE.PlaneGeometry(0.098, 0.060);
-  const sensorBarGeo = new THREE.BoxGeometry(0.006, 0.042, 0.80);
-  const sensorLensGeo = new THREE.CylinderGeometry(0.011, 0.011, 0.008, 12);
+  const bezelHousingGeo = new THREE.BoxGeometry(0.105, 0.068, 0.026);
+  const indicatorGeo = new THREE.PlaneGeometry(0.090, 0.054);
+  const ledStripGeo = new THREE.BoxGeometry(0.14, 0.008, 0.012);
+  const faceStemGeo = new THREE.CylinderGeometry(0.014, 0.016, 0.24, 10);
+  const faceBodyGeo = new THREE.BoxGeometry(0.11, 0.16, 0.022);
+  const faceScreenGeo = new THREE.PlaneGeometry(0.094, 0.142);
+  const sensorBarGeo = new THREE.BoxGeometry(0.006, 0.042, 0.74);
+  const sensorLensGeo = new THREE.CylinderGeometry(0.010, 0.010, 0.008, 12);
   sensorLensGeo.rotateZ(Math.PI / 2);
 
   // Per-cabinet indicator materials so adjacent housings highlight smoothly per lane
@@ -1079,44 +1065,27 @@ function buildTurnstiles(scene, y, M, colliders) {
     const cabM = new THREE.Matrix4().makeTranslation(bx, floorY, turnstileZ);
     const prevP = pushParent(tsBatch, cabM);
 
-    if (aoMat) tsBatch.add(aoGeo, aoMat, new THREE.Matrix4().makeTranslation(0, 0.003, 0));
-
-    // Rubber gasket + bolted brushed-steel floor plate + corner hex bolts
-    tsBatch.add(gasketGeo, rubberMat, new THREE.Matrix4().makeTranslation(0, 0.009, 0));
-    tsBatch.add(basePlateGeo, steelMat, new THREE.Matrix4().makeTranslation(0, 0.028, 0));
-    for (const [bxx, bzz] of [[-0.08, -0.62], [0.08, -0.62], [-0.08, 0.62], [0.08, 0.62]]) {
-      tsBatch.add(boltGeo, chromeMat, new THREE.Matrix4().makeTranslation(bxx, 0.042, bzz));
-    }
-
-    // Main brushed stainless-steel capsule chassis (center + front/rear semi-cylindrical noses)
-    tsBatch.add(bodyCoreGeo, steelMat, new THREE.Matrix4().makeTranslation(0, 0.47, 0));
-    tsBatch.add(noseCylGeo, steelMat, new THREE.Matrix4().makeTranslation(0, 0.47, 0.48));
-    tsBatch.add(noseCylGeo, steelMat, new THREE.Matrix4().makeTranslation(0, 0.47, -0.48));
-
-    // Dark-titanium vertical reveal seams + lower plinth reveal
-    for (const sz of [-0.34, 0, 0.34]) {
-      tsBatch.add(seamGeo, titanMat, new THREE.Matrix4().makeTranslation(0, 0.47, sz));
-    }
-    tsBatch.add(skirtRevealGeo, titanMat, new THREE.Matrix4().makeTranslation(0, 0.058, 0));
-
-    // Brushed chrome trim collar + glossy dark obsidian tempered-glass top deck
-    tsBatch.add(lidTrimCoreGeo, chromeMat, new THREE.Matrix4().makeTranslation(0, 0.908, 0));
-    tsBatch.add(lidTrimCylGeo, chromeMat, new THREE.Matrix4().makeTranslation(0, 0.908, 0.48));
-    tsBatch.add(lidTrimCylGeo, chromeMat, new THREE.Matrix4().makeTranslation(0, 0.908, -0.48));
-    tsBatch.add(lidCoreGeo, obsidianMat, new THREE.Matrix4().makeTranslation(0, 0.928, 0));
-    tsBatch.add(lidCylGeo, obsidianMat, new THREE.Matrix4().makeTranslation(0, 0.928, 0.48));
-    tsBatch.add(lidCylGeo, obsidianMat, new THREE.Matrix4().makeTranslation(0, 0.928, -0.48));
-
     // Illuminated RFID contactless pass card-reader pads on front & rear ends of top deck
-    for (const rz of [0.43, -0.43]) {
-      const rm = new THREE.Matrix4().makeTranslation(0, 0.943, rz);
+    for (const rz of [0.39, -0.39]) {
+      const rm = new THREE.Matrix4().makeTranslation(0, 0.948, rz);
       if (rz < 0) rm.multiply(new THREE.Matrix4().makeRotationY(Math.PI));
       tsBatch.add(readerPadGeo, readerMat, rm);
     }
 
-    // Recessed angled front & rear LED directional lane-status indicators
+    // Upright Hikvision/PERCo-style Face-ID biometric terminal on entry end of each СКУД pedestal
+    if (i < cabinetXs.length - 1) {
+      const fx = 0.035, fz = 0.24;
+      tsBatch.add(faceStemGeo, chromeMat, new THREE.Matrix4().makeTranslation(fx, 1.06, fz));
+      const tiltQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.18, -0.15, 0, 'YXZ'));
+      tsBatch.add(faceBodyGeo, titanMat, new THREE.Matrix4().compose(new THREE.Vector3(fx, 1.24, fz), tiltQ, new THREE.Vector3(1, 1, 1)));
+      const scrM = new THREE.Matrix4().compose(new THREE.Vector3(fx, 1.24, fz), tiltQ, new THREE.Vector3(1, 1, 1))
+        .multiply(new THREE.Matrix4().makeTranslation(0, 0, 0.012));
+      tsBatch.add(faceScreenGeo, faceIdMat, scrM);
+    }
+
+    // Recessed angled front & rear LED directional lane-status indicators + green СКУД trim strip
     const indMat = new THREE.MeshStandardMaterial({
-      map: arrowIdleTex, emissive: 0xffffff, emissiveMap: arrowIdleTex, emissiveIntensity: 1.45,
+      map: arrowIdleTex, emissive: 0xffffff, emissiveMap: arrowIdleTex, emissiveIntensity: 0.85,
       roughness: 0.18, metalness: 0.1,
     });
     cabinetIndicators.push(indMat);
@@ -1124,23 +1093,24 @@ function buildTurnstiles(scene, y, M, colliders) {
       const bezQ = new THREE.Quaternion().setFromEuler(
         new THREE.Euler(dirZ * -0.34, dirZ < 0 ? Math.PI : 0, 0, 'YXZ')
       );
-      const bezM = new THREE.Matrix4().compose(new THREE.Vector3(0, 0.80, dirZ * 0.562), bezQ, new THREE.Vector3(1, 1, 1));
+      const bezM = new THREE.Matrix4().compose(new THREE.Vector3(0, 0.78, dirZ * 0.585), bezQ, new THREE.Vector3(1, 1, 1));
       tsBatch.add(bezelHousingGeo, titanMat, bezM);
+      tsBatch.add(ledStripGeo, ledStripIdleMat, new THREE.Matrix4().makeTranslation(0, 0.90, dirZ * 0.57));
 
       const face = new THREE.Mesh(indicatorGeo, indMat);
-      face.position.set(bx, floorY + 0.80, turnstileZ + dirZ * 0.562);
+      face.position.set(bx, floorY + 0.78, turnstileZ + dirZ * 0.585);
       face.quaternion.copy(bezQ);
-      face.translateZ(0.015);
+      face.translateZ(0.014);
       group.add(face);
     }
 
     // Recessed black infrared optical sensor bars & lenses along inner lane faces
     const sensorSides = i === 0 ? [1] : i === cabinetXs.length - 1 ? [-1] : [-1, 1];
     for (const sgn of sensorSides) {
-      for (const sy of [0.36, 0.68]) {
-        tsBatch.add(sensorBarGeo, titanMat, new THREE.Matrix4().makeTranslation(sgn * 0.092, sy, 0));
-        for (const lz of [-0.32, -0.10, 0.10, 0.32]) {
-          tsBatch.add(sensorLensGeo, lensMat, new THREE.Matrix4().makeTranslation(sgn * 0.095, sy, lz));
+      for (const sy of [0.36, 0.66]) {
+        tsBatch.add(sensorBarGeo, titanMat, new THREE.Matrix4().makeTranslation(sgn * 0.084, sy, 0));
+        for (const lz of [-0.30, -0.10, 0.10, 0.30]) {
+          tsBatch.add(sensorLensGeo, lensMat, new THREE.Matrix4().makeTranslation(sgn * 0.087, sy, lz));
         }
       }
     }
@@ -1151,17 +1121,56 @@ function buildTurnstiles(scene, y, M, colliders) {
     if (colliders) {
       colliders.push({
         type: 'rect', x0: bx - 0.095, x1: bx + 0.095,
-        z0: turnstileZ - 0.66, z1: turnstileZ + 0.66,
-        y0: PODIUM, y1: PODIUM + 1.05,
+        z0: turnstileZ - 0.62, z1: turnstileZ + 0.62,
+        y0: PODIUM, y1: PODIUM + 1.15,
       });
     }
   }
 
-  // Tempered-glass swing barrier wings with rotary chrome hinge posts & laser-etched safety stripes
-  const hingeGeo = new THREE.CylinderGeometry(0.023, 0.023, 0.86, 16);
-  const clampGeo = new THREE.BoxGeometry(0.088, 0.056, 0.034);
-  const wingGeo = new THREE.BoxGeometry(0.49, 0.78, 0.014);
-  const stripeGeo = new THREE.PlaneGeometry(0.45, 0.72);
+  // Load compact brushed stainless speedgate.glb СКУД housings
+  const sgPromise = loadGLB('./assets/models/speedgate.glb')
+    .then((gltf) => {
+      for (const bx of cabinetXs) {
+        const cab = prepareModel(gltf.scene.clone(true), {
+          groundY: null,
+          centerXZ: true,
+          envMapIntensity: 1.35,
+          onMesh(obj) {
+            const m = obj.material;
+            if (!m) return;
+            if (m.name === 'GateSteel') {
+              m.metalness = 0.94;
+              m.roughness = 0.18;
+              m.envMapIntensity = 1.45;
+            } else if (m.name === 'GateObsidian') {
+              m.color.setHex(0x090c12);
+              m.metalness = 0.22;
+              m.roughness = 0.05;
+              m.envMapIntensity = 1.65;
+            } else if (m.name === 'GatePlinth') {
+              m.metalness = 0.60;
+              m.roughness = 0.42;
+              m.envMapIntensity = 0.9;
+            }
+          },
+        });
+        cab.scale.set(0.84, 0.96, 0.88);
+        cab.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(cab);
+        cab.position.x = bx;
+        cab.position.y += floorY - box.min.y;
+        cab.position.z = turnstileZ;
+        group.add(cab);
+      }
+    })
+    .catch(() => {});
+  _interiorPending.push(sgPromise);
+
+  // Tempered-glass swing barrier wings with rotary chrome hinge posts & crisp safety stripes
+  const hingeGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.84, 16);
+  const clampGeo = new THREE.BoxGeometry(0.084, 0.052, 0.030);
+  const wingGeo = new THREE.BoxGeometry(0.49, 0.76, 0.011);
+  const stripeGeo = new THREE.PlaneGeometry(0.45, 0.12);
 
   const makeWing = (pivotX, sideSign) => {
     const pivot = new THREE.Group();
@@ -1209,11 +1218,9 @@ function buildTurnstiles(scene, y, M, colliders) {
   const postGeo = new THREE.CylinderGeometry(0.023, 0.023, 0.90, 14);
   const flangeGeo = new THREE.CylinderGeometry(0.045, 0.115, 0.036, 16);
   const capGeo = new THREE.SphereGeometry(0.024, 12, 8);
-  const stAO = new THREE.PlaneGeometry(0.32, 0.32); stAO.rotateX(-Math.PI / 2);
 
   const addStanchionSegment = (x0, z0, x1, z1, withGlass = false) => {
     for (const [sx, sz] of [[x0, z0], [x1, z1]]) {
-      if (aoMat) tsBatch.add(stAO, aoMat, new THREE.Matrix4().makeTranslation(sx, floorY + 0.003, sz));
       tsBatch.add(flangeGeo, chromeMat, new THREE.Matrix4().makeTranslation(sx, floorY + 0.018, sz));
       tsBatch.add(postGeo, chromeMat, new THREE.Matrix4().makeTranslation(sx, floorY + 0.47, sz));
       tsBatch.add(capGeo, chromeMat, new THREE.Matrix4().makeTranslation(sx, floorY + 0.92, sz));
@@ -1236,8 +1243,12 @@ function buildTurnstiles(scene, y, M, colliders) {
     }
   };
 
-  addStanchionSegment(2.12, turnstileZ, 3.10, turnstileZ, true);
-  addStanchionSegment(-2.12, turnstileZ, -2.52, turnstileZ + 0.14, false);
+  addStanchionSegment(2.04, turnstileZ, 4.10, turnstileZ, true);
+  addStanchionSegment(-2.04, turnstileZ, -3.72, turnstileZ, true);
+  if (colliders) {
+    colliders.push({ type: 'rect', x0: 2.02, x1: 4.12, z0: turnstileZ - 0.08, z1: turnstileZ + 0.08, y0: PODIUM, y1: PODIUM + 1.05 });
+    colliders.push({ type: 'rect', x0: -3.74, x1: -2.02, z0: turnstileZ - 0.08, z1: turnstileZ + 0.08, y0: PODIUM, y1: PODIUM + 1.05 });
+  }
 
   tsBatch.build(group, { cast: true, receive: true, name: 'turnstiles-static' });
   scene.add(group);
@@ -1424,10 +1435,10 @@ function buildGrandStairs(batch, M, colliders) {
   const brassMat = mat(M, 'brushedBrass', 'chrome');
   const railMat = mat(M, 'walnutDoor', 'woodLight');
   const treadLedMat = cachedMaterial({
-    color: 0xffe4b8, emissive: 0xffce84, emissiveIntensity: 1.35, roughness: 0.4,
+    color: 0xffe4b8, emissive: 0xffce84, emissiveIntensity: 0.78, roughness: 0.4,
   });
 
-  for (let level = 0; level < 2; level++) {
+  for (let level = 0; level < 3; level++) {
     const baseY = FLOOR[level];
     const arcs = [
       { a0: 200 * DEG, a1: 340 * DEG },
@@ -1530,7 +1541,7 @@ function buildElevator(batch, M, parentGroup, colliders) {
   const glassMat = mat(M, 'glass', 'glassTint');
   const brassMat = mat(M, 'brushedBrass', 'chrome');
 
-  const shaftH = FLOOR[2] + WALL_H;
+  const shaftH = FLOOR[3] + WALL_H;
   const outerGlass = new THREE.CylinderGeometry(shaftR, shaftR, shaftH, 36, 1, true);
   batch.add(outerGlass, glassMat, new THREE.Matrix4().makeTranslation(0, shaftH / 2, 0));
 
@@ -1540,7 +1551,7 @@ function buildElevator(batch, M, parentGroup, colliders) {
     batch.box(shaftMat, 0.06, shaftH, 0.08, p.x, shaftH / 2, p.z, Math.atan2(Math.sin(a), -Math.cos(a)));
   }
 
-  for (let lv = 0; lv < 3; lv++) {
+  for (let lv = 0; lv < 4; lv++) {
     const fy = FLOOR[lv];
     const ring = new THREE.TorusGeometry(shaftR + 0.02, 0.04, 10, 36);
     ring.rotateX(Math.PI / 2);
@@ -1551,8 +1562,8 @@ function buildElevator(batch, M, parentGroup, colliders) {
   // Sliding brushed-steel doors + portal frames + hall call panels on each landing
   const doorParts = [];
   const elevDoorMat = mat(M, 'brushedSteel', 'chrome');
-  const callBtnMat = cachedMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 1.4 });
-  for (let lv = 0; lv < 3; lv++) {
+  const callBtnMat = cachedMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 0.75 });
+  for (let lv = 0; lv < 4; lv++) {
     const fy = FLOOR[lv];
     const floorOff = lv === 0 ? 0.04 : 0.02;
     // Door portal jambs & header transom
@@ -1639,7 +1650,7 @@ function buildElevator(batch, M, parentGroup, colliders) {
   cabCrown.position.y = 2.66;
   cabin.add(cabCeil, cabLightRing, cabCrown);
 
-  const cabinLight = new THREE.PointLight(0xfff0d4, 2.4, 8, 1.4);
+  const cabinLight = new THREE.PointLight(0xfff0d4, 1.4, 8, 1.4);
   cabinLight.position.y = 2.25;
   cabin.add(cabinLight);
 
@@ -1650,7 +1661,7 @@ function buildElevator(batch, M, parentGroup, colliders) {
   colliders.push({
     type: 'elevator',
     x: 0, z: shaftR + 0.6, r: 1.4,
-    levels: [PODIUM + FLOOR[0], PODIUM + FLOOR[1], PODIUM + FLOOR[2]],
+    levels: [PODIUM + FLOOR[0], PODIUM + FLOOR[1], PODIUM + FLOOR[2], PODIUM + FLOOR[3]],
   });
 
   return { doorParts, cabin };
@@ -1680,7 +1691,10 @@ function hall(batch, M, colliders) {
   const collarTorus = new THREE.TorusGeometry(0.30, 0.020, 10, 24);
   collarTorus.rotateX(Math.PI / 2);
 
-  for (let lv = 0; lv < 3; lv++) {
+  const glassMat = mat(M, 'glass', 'glassTint');
+  const railMat = mat(M, 'walnutDoor', 'woodLight');
+
+  for (let lv = 0; lv < 4; lv++) {
     const y = FLOOR[lv];
     const floorTop = lv === 0 ? y + 0.04 : y + 0.02;
 
@@ -1689,6 +1703,42 @@ function hall(batch, M, colliders) {
         marbleMat, new THREE.Matrix4().makeTranslation(0, y + 0.02, 0));
     } else {
       addRotundaRing(batch, marbleMat, R.core + 0.06, r - 0.1, y + 0.02, false, true);
+
+      // Finished stairwell cutout fascia + glass/chrome/walnut gallery guardrails on upper floors
+      const cutoutArcs = [
+        { a0: 20 * DEG, a1: 160 * DEG },
+        { a0: 200 * DEG, a1: 340 * DEG },
+      ];
+      for (const arc of cutoutArcs) {
+        const aSpan = arc.a1 - arc.a0;
+        for (const edgeR of [4.48, 6.72]) {
+          // Vertical stone fascia sealing slab-to-ceiling thickness around stairwell opening
+          const fSegs = 20;
+          for (let s = 0; s < fSegs; s++) {
+            const am = arc.a0 + ((s + 0.5) / fSegs) * aSpan;
+            const pf = polar(am, edgeR);
+            const segW = (2 * Math.PI * edgeR * (aSpan / (Math.PI * 2))) / fSegs * 1.04;
+            batch.box(stoneMat, segW, 0.24, 0.06, pf.x, y - 0.10, pf.z, Math.atan2(Math.sin(am), -Math.cos(am)));
+          }
+          // Upper-gallery tempered glass balustrade + chrome posts + walnut top rail
+          const bays = 8;
+          for (let k = 0; k <= bays; k++) {
+            const a = arc.a0 + (k / bays) * aSpan;
+            const pe = polar(a, edgeR);
+            batch.cyl(steelMat, 0.04, 0.044, 0.02, 10, pe.x, floorTop + 0.01, pe.z);
+            batch.cyl(steelMat, 0.018, 0.018, 0.90, 10, pe.x, floorTop + 0.46, pe.z);
+            if (k < bays) {
+              buildSpiralGlassPanel(batch, glassMat, edgeR, arc.a0, aSpan, k / bays, (k + 1) / bays, y, 0, 0.10, 0.88, 0.016);
+            }
+          }
+          const railSegs = 24;
+          for (let k = 0; k < railSegs; k++) {
+            const p0 = polar(arc.a0 + (k / railSegs) * aSpan, edgeR);
+            const p1 = polar(arc.a0 + ((k + 1) / railSegs) * aSpan, edgeR);
+            addStairRailSeg(batch, railMat, p0.x, floorTop + 0.94, p0.z, p1.x, floorTop + 0.94, p1.z, 0.030);
+          }
+        }
+      }
     }
 
     // Flush inlaid Nero Marquina stone & brushed-brass pinstripe floor bands
@@ -1706,11 +1756,10 @@ function hall(batch, M, colliders) {
       }
     }
 
-    // Eight classical marble columns with Attic bases, brass collars, capitals & floor AO discs
+    // Eight classical marble columns with Attic bases, brass collars & capitals
     for (let i = 0; i < 8; i++) {
       const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
       const p = polar(a, r - 1.1);
-      addAODisc(batch, M, p.x, floorTop + 0.003, p.z, 1.45, 1.45);
       // Stepped square marble plinth
       batch.box(stoneMat, 0.84, 0.12, 0.84, p.x, floorTop + 0.06, p.z, -a);
       // Attic torus/scotia base molding
@@ -1730,7 +1779,7 @@ function hall(batch, M, colliders) {
     }
 
     // Bright white Armstrong ceiling ring + recessed LED panels in slim brushed-aluminum bezels
-    addRotundaRing(batch, mat(M, 'ceiling', 'stone'), R.core + 0.06, r - 0.1, y + 3.36, true, lv < 2);
+    addRotundaRing(batch, mat(M, 'ceiling', 'stone'), R.core + 0.06, r - 0.1, y + 3.36, true, lv < 3);
     for (let i = 0; i < 16; i++) {
       const a = (i / 16) * Math.PI * 2;
       const p = polar(a, r - 1.55);
@@ -1778,7 +1827,6 @@ function buildSecurityOfficer(batch, M, parentGroup, gx, floorY, gz, ry) {
   const cx = 0.04, cz = -0.54;
 
   // --- Static Ergonomic High-Back Ribbed Leather Executive Swivel Chair ---
-  addAODisc(batch, M, cx, 0.004, cz, 0.85, 0.85);
   // 5-star brushed-chrome base + dual-wheel casters touching floor
   batch.cyl(chromeMat, 0.042, 0.052, 0.12, 12, cx, 0.11, cz);
   batch.cyl(titanMat, 0.026, 0.026, 0.26, 10, cx, 0.28, cz);
@@ -1858,295 +1906,88 @@ function buildSecurityOfficer(batch, M, parentGroup, gx, floorY, gz, ry) {
   }
   batch.setParent(prev);
 
-  // --- Live-Animated Security Officer Upper Body & Sculpted Head/Cap ---
+  // --- GLB Security Officer Seated Behind Reception Desk ---
   const officerRoot = new THREE.Group();
   officerRoot.name = 'security-officer';
   officerRoot.position.set(gx, floorY, gz);
   officerRoot.rotation.y = ry;
 
-  const torsoGroup = new THREE.Group();
-  torsoGroup.position.set(cx, 0.58, cz);
-  officerRoot.add(torsoGroup);
-
-  // Smooth sculpted tailored uniform torso (LatheGeometry scaled to anatomical oval)
-  const torsoPts = [
-    new THREE.Vector2(0.01, 0.0), new THREE.Vector2(0.145, 0.02), new THREE.Vector2(0.138, 0.14),
-    new THREE.Vector2(0.165, 0.30), new THREE.Vector2(0.175, 0.43), new THREE.Vector2(0.148, 0.51),
-    new THREE.Vector2(0.068, 0.55), new THREE.Vector2(0.01, 0.55),
-  ];
-  const torsoGeo = new THREE.LatheGeometry(torsoPts, 24);
-  const torsoMesh = new THREE.Mesh(torsoGeo, uniformMat);
-  torsoMesh.scale.set(1.28, 1.0, 0.74);
-  torsoMesh.castShadow = true;
-  torsoGroup.add(torsoMesh);
-
-  // Crisp white collared dress shirt V-front + structured collar wings + silk tie + silver clip
-  const shirtFront = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.042, 0.25, 14, 1, false, -0.7, 1.4), shirtMat);
-  shirtFront.position.set(0, 0.41, 0.072);
-  torsoGroup.add(shirtFront);
-  const collarRing = new THREE.Mesh(new THREE.CylinderGeometry(0.064, 0.074, 0.055, 16), shirtMat);
-  collarRing.position.set(0, 0.545, 0.01);
-  torsoGroup.add(collarRing);
-
-  const tieKnot = new THREE.Mesh(new THREE.SphereGeometry(0.022, 10, 8), tieMat);
-  tieKnot.position.set(0, 0.515, 0.118);
-  tieKnot.scale.set(1.0, 1.15, 0.75);
-  const tieBlade = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.21, 0.012), tieMat);
-  tieBlade.position.set(0, 0.395, 0.122);
-  const tieClip = new THREE.Mesh(new THREE.BoxGeometry(0.044, 0.008, 0.016), chromeMat);
-  tieClip.position.set(0.006, 0.38, 0.125);
-  torsoGroup.add(tieKnot, tieBlade, tieClip);
-
-  // Tailored notched jacket lapels + 2 front buttons
-  for (const s of [-1, 1]) {
-    const lapel = new THREE.Mesh(new THREE.BoxGeometry(0.048, 0.25, 0.018), uniformMat);
-    lapel.position.set(s * 0.058, 0.405, 0.120);
-    lapel.rotation.z = -s * 0.24;
-    lapel.rotation.y = s * 0.22;
-    torsoGroup.add(lapel);
-  }
-  for (const by of [0.22, 0.12]) {
-    const btn = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.011, 0.008, 10), brassMat);
-    btn.rotation.x = Math.PI / 2;
-    btn.position.set(0, by, 0.130);
-    torsoGroup.add(btn);
-  }
-
-  // Gold-piped shoulder epaulets
-  for (const s of [-1, 1]) {
-    const ep = new THREE.Group();
-    ep.position.set(s * 0.145, 0.525, 0.0);
-    ep.rotation.z = -s * 0.22;
-    const strap = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.016, 0.052), uniformMat);
-    const goldEdge = new THREE.Mesh(new THREE.BoxGeometry(0.114, 0.012, 0.056), brassMat);
-    goldEdge.position.y = -0.003;
-    const stud = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.01, 10), brassMat);
-    stud.position.set(-s * 0.038, 0.010, 0);
-    ep.add(goldEdge, strap, stud);
-    torsoGroup.add(ep);
-  }
-
-  // Metallic gold/chrome chest security shield badge
-  const badgeMat = new THREE.MeshStandardMaterial({ map: makeBadgeTex(), metalness: 0.72, roughness: 0.24 });
-  const badgeRim = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.026, 0.010, 12), brassMat);
-  badgeRim.rotation.x = Math.PI / 2;
-  badgeRim.position.set(0.105, 0.415, 0.126);
-  badgeRim.rotation.y = 0.28;
-  const badgeFace = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.022, 0.012, 12), badgeMat);
-  badgeFace.rotation.x = Math.PI / 2;
-  badgeFace.position.set(0.106, 0.415, 0.128);
-  badgeFace.rotation.y = 0.28;
-  torsoGroup.add(badgeRim, badgeFace);
-
-  // Shoulder-mounted radio speaker-mic + black coiled cord on left chest/shoulder
-  const micBody = new THREE.Mesh(new THREE.BoxGeometry(0.044, 0.064, 0.026), titanMat);
-  micBody.position.set(-0.145, 0.46, 0.105);
-  micBody.rotation.set(-0.15, -0.35, 0.18);
-  const micPTT = new THREE.Mesh(new THREE.BoxGeometry(0.010, 0.024, 0.012), cachedMaterial({ color: 0xcc2222, roughness: 0.5 }));
-  micPTT.position.set(-0.024, 0, 0);
-  const micLED = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.008, 0.006), cachedMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 1.5 }));
-  micLED.position.set(0.010, 0.022, 0.014);
-  micBody.add(micPTT, micLED);
-  torsoGroup.add(micBody);
-
-  // Helical coiled black radio cord descending along left chest
-  const helixPts = [];
-  const turns = 7, segsPerTurn = 8;
-  for (let i = 0; i <= turns * segsPerTurn; i++) {
-    const t = i / (turns * segsPerTurn);
-    const ang = t * turns * Math.PI * 2;
-    const hx = -0.145 + t * 0.025 + Math.cos(ang) * 0.011;
-    const hy = 0.425 - t * 0.24;
-    const hz = 0.112 + t * 0.018 + Math.sin(ang) * 0.011;
-    helixPts.push(new THREE.Vector3(hx, hy, hz));
-  }
-  const cordGeo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(helixPts), 56, 0.0038, 6, false);
-  torsoGroup.add(new THREE.Mesh(cordGeo, titanMat));
-
-  // Articulated arms & sculpted palms/fingers resting comfortably on desk (world worktop y = 0.76 -> torso local y = 0.18)
-  const buildArm = (side) => {
-    const sh = new THREE.Group();
-    sh.position.set(side * 0.21, 0.48, 0.01);
-    const shCap = new THREE.Mesh(new THREE.SphereGeometry(0.056, 12, 10), uniformMat);
-    sh.add(shCap);
-    // Upper arm angled down & slightly forward
-    const upper = new THREE.Mesh(new THREE.CapsuleGeometry(0.048, 0.21, 8, 14), uniformMat);
-    upper.position.set(side * 0.02, -0.13, 0.04);
-    upper.rotation.set(-0.34, 0, side * 0.10);
-    upper.castShadow = true;
-    sh.add(upper);
-    // Elbow sphere
-    const elb = new THREE.Mesh(new THREE.SphereGeometry(0.045, 12, 10), uniformMat);
-    elb.position.set(side * 0.036, -0.255, 0.095);
-    sh.add(elb);
-    // Forearm reaching forward onto worktop (z = +0.34, y = 0.20)
-    const fore = new THREE.Mesh(new THREE.CapsuleGeometry(0.040, 0.20, 8, 14), uniformMat);
-    fore.position.set(side * 0.015, -0.265, 0.22);
-    fore.rotation.set(1.48, side * 0.16, 0);
-    fore.castShadow = true;
-    sh.add(fore);
-    // Crisp white shirt cuff
-    const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.038, 0.036, 0.026, 14), shirtMat);
-    cuff.position.set(side * -0.005, -0.275, 0.325);
-    cuff.rotation.set(1.48, side * 0.16, 0);
-    sh.add(cuff);
-    // Sculpted palm + 4 fingers + thumb resting gently on desk
-    const hand = new THREE.Group();
-    hand.position.set(side * -0.015, -0.280, 0.372);
-    hand.rotation.set(0.08, -side * 0.14, 0);
-    const palm = new THREE.Mesh(new THREE.SphereGeometry(0.038, 12, 10), skinMat);
-    palm.scale.set(0.95, 0.42, 1.15);
-    hand.add(palm);
-    for (let f = 0; f < 4; f++) {
-      const fMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.0075, 0.036, 4, 8), skinMat);
-      fMesh.position.set((-0.022 + f * 0.0145), -0.006, 0.042);
-      fMesh.rotation.x = 1.32;
-      hand.add(fMesh);
-    }
-    const thumb = new THREE.Mesh(new THREE.CapsuleGeometry(0.0085, 0.028, 4, 8), skinMat);
-    thumb.position.set(-side * 0.034, -0.004, 0.018);
-    thumb.rotation.set(1.38, -side * 0.48, 0);
-    hand.add(thumb);
-    sh.add(hand);
-    torsoGroup.add(sh);
-  };
-  buildArm(-1);
-  buildArm(1);
-
-  // --- Sculpted Human Head, Painted Portrait Face & Peaked Navy Uniform Cap ---
-  const headGroup = new THREE.Group();
-  headGroup.position.set(0, 0.56, 0.015);
-  torsoGroup.add(headGroup);
-
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.060, 0.10, 18), skinMat);
-  neck.position.y = 0.03;
-  headGroup.add(neck);
-
-  // Sculpted anatomical cranium + tapered lower jaw/chin (SphereGeometry UV aligned so u=0.5 faces +Z!)
-  const headGeo = new THREE.SphereGeometry(0.096, 32, 24, -Math.PI / 2, Math.PI * 2);
-  const hp = headGeo.attributes.position;
-  for (let i = 0; i < hp.count; i++) {
-    let x = hp.getX(i), y = hp.getY(i), z = hp.getZ(i);
-    x *= 0.87;
-    y *= 1.13;
-    z *= 0.98;
-    // Gently taper lower jaw & pull chin subtly forward
-    if (y < 0) {
-      const jt = Math.min(1, -y / 0.105);
-      x *= (1 - jt * 0.24);
-      if (z > 0) z += jt * 0.010;
-    }
-    hp.setXYZ(i, x, y, z);
-  }
-  headGeo.computeVertexNormals();
-  const faceMat = new THREE.MeshStandardMaterial({
-    map: makeGuardFaceTex(), roughness: 0.56, metalness: 0.0, envMapIntensity: 0.25,
-  });
-  const headMesh = new THREE.Mesh(headGeo, faceMat);
-  headMesh.position.set(0, 0.155, 0.005);
-  headMesh.castShadow = true;
-  headGroup.add(headMesh);
-
-  // Sculpted 3D nose bridge + ears + dark hair nape
-  const nose = new THREE.Mesh(new THREE.CapsuleGeometry(0.011, 0.022, 6, 10), skinMat);
-  nose.position.set(0, 0.148, 0.098);
-  nose.rotation.x = -0.22;
-  headGroup.add(nose);
-
-  for (const s of [-1, 1]) {
-    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.022, 10, 8), skinMat);
-    ear.position.set(s * 0.084, 0.152, -0.005);
-    ear.scale.set(0.38, 1.05, 0.68);
-    ear.rotation.y = s * 0.24;
-    headGroup.add(ear);
-  }
-  const hairBack = new THREE.Mesh(new THREE.SphereGeometry(0.096, 18, 14, Math.PI * 0.95, Math.PI * 1.10, 0.22, 1.45), hairMat);
-  hairBack.position.set(0, 0.160, 0.0);
-  hairBack.scale.set(0.89, 1.12, 1.0);
-  headGroup.add(hairBack);
-
-  // Sculpted Peaked Navy Uniform Cap (Lathe crown + curved glossy visor + gold cord + cockade)
-  const capGroup = new THREE.Group();
-  capGroup.position.set(0, 0.225, 0.008);
-  capGroup.rotation.x = -0.08;
-  const capPts = [
-    new THREE.Vector2(0.086, 0.0), new THREE.Vector2(0.089, 0.032),
-    new THREE.Vector2(0.114, 0.072), new THREE.Vector2(0.106, 0.088),
-    new THREE.Vector2(0.0, 0.094),
-  ];
-  const capCrown = new THREE.Mesh(new THREE.LatheGeometry(capPts, 24), uniformMat);
-  capCrown.scale.set(0.92, 1.0, 1.04);
-  capCrown.castShadow = true;
-  capGroup.add(capCrown);
-
-  const capBand = new THREE.Mesh(new THREE.CylinderGeometry(0.090, 0.088, 0.030, 24), titanMat);
-  capBand.position.y = 0.016;
-  capBand.scale.set(0.92, 1.0, 1.04);
-  capGroup.add(capBand);
-
-  // Curved glossy black patent visor brim
-  const visorGeo = new THREE.CylinderGeometry(0.108, 0.122, 0.010, 20, 1, false, -Math.PI * 0.34, Math.PI * 0.68);
-  const visor = new THREE.Mesh(visorGeo, visorMat);
-  visor.position.set(0, -0.004, 0.025);
-  visor.rotation.x = 0.28;
-  capGroup.add(visor);
-
-  // Gold braided chinstrap cord across front band + metallic gold cockade badge
-  const capCordGeo = new THREE.TorusGeometry(0.089, 0.0045, 8, 20, Math.PI * 0.64);
-  capCordGeo.rotateZ(Math.PI * 0.18);
-  const cordArc = new THREE.Mesh(capCordGeo, brassMat);
-  cordArc.rotation.x = Math.PI / 2;
-  cordArc.position.set(0, 0.015, 0.012);
-  capGroup.add(cordArc);
-
-  const cockadeOuter = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.008, 16), brassMat);
-  cockadeOuter.rotation.x = Math.PI / 2 - 0.18;
-  cockadeOuter.position.set(0, 0.054, 0.099);
-  const cockadeInner = new THREE.Mesh(new THREE.CylinderGeometry(0.010, 0.010, 0.010, 12), cachedMaterial({ color: 0x0b4a8c, roughness: 0.35 }));
-  cockadeInner.rotation.x = Math.PI / 2 - 0.18;
-  cockadeInner.position.set(0, 0.054, 0.100);
-  capGroup.add(cockadeOuter, cockadeInner);
-
-  headGroup.add(capGroup);
+  const seatAnchor = new THREE.Group();
+  seatAnchor.position.set(cx, 0, cz);
+  officerRoot.add(seatAnchor);
   parentGroup.add(officerRoot);
+
+  let officerModel = null;
+  let headTarget = null;
+  const offPromise = loadGLB('./assets/models/officer.glb')
+    .then((gltf) => {
+      const m = gltf.scene.clone(true);
+      m.scale.setScalar(1.04); // ~1.78m adult stature in seated desk posture
+      prepareModel(m, {
+        groundY: null,
+        envMapIntensity: 0.45,
+        onMesh(obj) {
+          const mt = obj.material;
+          if (!mt) return;
+          if (mt.name === 'OfficerGold') {
+            mt.metalness = 0.9;
+            mt.roughness = 0.22;
+            mt.envMapIntensity = 1.35;
+          } else if (mt.name === 'OfficerVisor') {
+            mt.roughness = 0.06;
+            mt.envMapIntensity = 1.5;
+          } else if (mt.name === 'OfficerSkin') {
+            mt.roughness = 0.58;
+            mt.envMapIntensity = 0.28;
+          }
+        },
+      });
+      // Verify Box3 at load time and ground seated hips cleanly onto executive chair seat (y = 0.50)
+      const box = new THREE.Box3().setFromObject(m);
+      m.position.y += 0.50 - box.min.y;
+      seatAnchor.add(m);
+      officerModel = m;
+      headTarget = m.getObjectByName('LeePerrySmith') || null;
+      return m;
+    })
+    .catch(() => null);
+  _interiorPending.push(offPromise);
 
   // World position of guard desk for proximity glance
   const worldGuardPos = new THREE.Vector3(gx, PODIUM, gz);
 
   return {
     update(dt, elapsed, playerPos) {
-      // Calm, dignified natural chest breathing (~0.26 Hz)
+      if (!officerModel) return;
       const breath = Math.sin(elapsed * 1.65);
-      torsoGroup.scale.set(1 + breath * 0.006, 1 + breath * 0.008, 1 + breath * 0.014);
-      torsoGroup.rotation.x = breath * 0.010;
+      seatAnchor.scale.set(1 + breath * 0.004, 1 + breath * 0.006, 1 + breath * 0.009);
 
-      // Calm head scan + gentle attentive glance toward nearby visitor
-      let targetYaw = Math.sin(elapsed * 0.38) * 0.18 + Math.sin(elapsed * 0.17) * 0.07;
-      let targetPitch = -0.02 + Math.sin(elapsed * 0.45) * 0.025;
+      let targetYaw = Math.sin(elapsed * 0.38) * 0.14;
       if (playerPos && Math.abs(playerPos.y - PODIUM) < 1.5) {
         const dx = playerPos.x - worldGuardPos.x;
         const dz = playerPos.z - worldGuardPos.z;
         const dist = Math.hypot(dx, dz);
         if (dist < 4.8 && dz > 0.2) {
           const worldAngle = Math.atan2(dx, dz);
-          const localRel = Math.max(-0.55, Math.min(0.55, worldAngle - ry));
+          const localRel = Math.max(-0.45, Math.min(0.45, worldAngle - ry));
           const blend = 1 - dist / 4.8;
-          targetYaw = THREE.MathUtils.lerp(targetYaw, localRel, blend * 0.72);
-          targetPitch = THREE.MathUtils.lerp(targetPitch, -0.03, blend * 0.6);
+          targetYaw = THREE.MathUtils.lerp(targetYaw, localRel, blend * 0.68);
         }
       }
-      headGroup.rotation.y += (targetYaw - headGroup.rotation.y) * Math.min(1, dt * 3.0);
-      headGroup.rotation.x += (targetPitch - headGroup.rotation.x) * Math.min(1, dt * 3.0);
-      headGroup.rotation.z = Math.sin(elapsed * 0.29) * 0.022;
+      if (headTarget) {
+        headTarget.rotation.y += (targetYaw - headTarget.rotation.y) * Math.min(1, dt * 3.0);
+      } else {
+        seatAnchor.rotation.y += (targetYaw * 0.45 - seatAnchor.rotation.y) * Math.min(1, dt * 2.5);
+      }
     },
   };
 }
 
-/* ============================================================ GUARD POST (left of entry) */
+/* ============================================================ GUARD POST (left of entry, rotated sideways facing +X) */
 function guardPost(batch, M, colliders, parentGroup) {
-  const gx = -3.88, gz = 8.75;
+  const gx = -4.25, gz = 10.65;
   const floorY = 0.04;
-  const ry = 0.28;
+  const ry = Math.PI / 2;
   const m4 = new THREE.Matrix4().compose(
     new THREE.Vector3(gx, floorY, gz),
     new THREE.Quaternion().setFromEuler(new THREE.Euler(0, ry, 0)),
@@ -2159,11 +2000,8 @@ function guardPost(batch, M, colliders, parentGroup) {
   const chromeMat = mat(M, 'chrome', 'brushedSteel');
   const titanMat = mat(M, 'darkTitanium', 'metalDark');
   const frostedMat = mat(M, 'frostedGlass', 'glass');
-  const coveLedMat = cachedMaterial({ color: 0xffe4b4, emissive: 0xffc870, emissiveIntensity: 1.55, roughness: 0.3 });
-  const haloLedMat = cachedMaterial({ color: 0x70e0ff, emissive: 0x35b8ff, emissiveIntensity: 1.35, roughness: 0.35 });
-
-  // Grounding contact AO shadow under reception counter
-  addAODisc(batch, M, 0, 0.004, 0, 3.15, 1.48);
+  const coveLedMat = cachedMaterial({ color: 0xffe4b4, emissive: 0xffc870, emissiveIntensity: 0.95, roughness: 0.3 });
+  const haloLedMat = cachedMaterial({ color: 0x70e0ff, emissive: 0x35b8ff, emissiveIntensity: 0.85, roughness: 0.35 });
 
   // 1. Chamfered/curved two-tier luxury Nero Marquina & walnut-slat reception counter
   // Recessed dark toe-kick plinth + warm under-plinth LED cove glow
@@ -2279,8 +2117,8 @@ function guardPost(batch, M, colliders, parentGroup) {
   const guardRig = buildSecurityOfficer(batch, M, parentGroup, gx, floorY, gz, ry);
 
   colliders.push({
-    type: 'rect', x0: gx - 1.35, x1: gx + 1.35, z0: gz - 0.65, z1: gz + 0.65,
-    y0: PODIUM, y1: PODIUM + 1.2,
+    type: 'rect', x0: gx - 1.08, x1: gx + 0.52, z0: gz - 1.35, z1: gz + 1.35,
+    y0: PODIUM, y1: PODIUM + 1.6,
   });
 
   return guardRig;
@@ -2290,48 +2128,20 @@ function guardPost(batch, M, colliders, parentGroup) {
 function waitingArea(batch, M) {
   const y = 0.04; // flush on top of ground-floor marble slab
   const wx = 4.4, wz = 8.8;
-  const neroMat = mat(M, 'neroMarble', 'graniteDark');
-  const walnutMat = mat(M, 'walnutSlat', 'walnutDoor');
-  const brassMat = mat(M, 'brushedBrass', 'chrome');
-  const chromeMat = mat(M, 'chrome', 'brushedSteel');
 
-  // Two tufted cognac leather lounge sofas angled neatly facing lobby
-  sofa(batch, M, wx, y, wz - 1.15, -Math.PI / 2 - 0.25, 'leatherCognac');
-  sofa(batch, M, wx + 0.3, y, wz + 1.25, -Math.PI / 2 - 0.25, 'leatherCognac');
+  // GLB designer lounge seating + armchairs + coffee table
+  sofa(batch, M, wx + 0.15, y, wz - 1.20, -Math.PI / 2 - 0.25);
+  armchair(batch, wx + 0.45, y, wz + 0.95, -Math.PI / 2 - 0.45);
+  armchair(batch, wx - 0.30, y, wz + 1.70, -Math.PI * 0.82);
+  coffeeTable(batch, wx - 0.92, y, wz + 0.08, -0.25);
 
-  // Marble-topped walnut coffee table + grounding AO shadow + corporate brochures
-  const tx = wx - 0.92, tz = wz + 0.08, tryY = -0.25;
-  const tm4 = new THREE.Matrix4().compose(
-    new THREE.Vector3(tx, y, tz),
-    new THREE.Quaternion().setFromEuler(new THREE.Euler(0, tryY, 0)),
-    new THREE.Vector3(1, 1, 1)
-  );
-  const prev = pushParent(batch, tm4);
-  addAODisc(batch, M, 0, 0.004, 0, 1.28, 0.92);
-  // Sculpted walnut frame legs & lower shelf
-  for (const [lx, lz] of [[-0.44, -0.25], [0.44, -0.25], [-0.44, 0.25], [0.44, 0.25]]) {
-    batch.cyl(walnutMat, 0.024, 0.018, 0.39, 10, lx, 0.195, lz);
-    batch.cyl(brassMat, 0.020, 0.020, 0.03, 10, lx, 0.015, lz);
-  }
-  batch.box(walnutMat, 0.96, 0.045, 0.58, 0, 0.37, 0);
-  batch.box(neroMat, 1.02, 0.032, 0.64, 0, 0.41, 0);
-  batch.box(brassMat, 1.03, 0.008, 0.65, 0, 0.393, 0);
-  // Glossy corporate magazines & chrome brochure stand on coffee table
-  const mag1 = cachedMaterial({ map: makeMagazineTex('QazaqGaz', 'ОТЧЁТ 2026', '#0b4488', '#38d8ff'), roughness: 0.32 });
-  const mag2 = cachedMaterial({ map: makeMagazineTex('УМГ УРАЛЬСК', 'ЭНЕРГИЯ СТЕПИ', '#1a2736', '#ffd23f'), roughness: 0.35 });
-  batch.box(mag1, 0.22, 0.010, 0.30, -0.18, 0.432, 0.06, 0.18);
-  batch.box(mag2, 0.21, 0.010, 0.29, -0.06, 0.440, -0.04, -0.24);
-  batch.box(chromeMat, 0.18, 0.012, 0.16, 0.28, 0.432, -0.08, -0.2);
-  batch.box(mat(M, 'glass', 'glassTint'), 0.16, 0.20, 0.010, 0.28, 0.53, -0.10, -0.2, -0.26);
-  batch.setParent(prev);
-
-  // Lush multi-stem ficus trees in glazed architectural planters
+  // GLB botanical planters
   plant(batch, M, wx + 0.8, y, wz - 2.35, 1.42);
-  plant(batch, M, -6.2, y, 9.6, 1.32);
+  plant(batch, M, -3.85, y, 12.65, 1.32);
 
   // Brushed-steel lobby waste/recycling bins
   lobbyBin(batch, M, wx + 1.15, y, wz + 2.25);
-  lobbyBin(batch, M, -5.55, y, 6.95);
+  lobbyBin(batch, M, -3.85, y, 8.95);
 }
 
 /* ============================================================ BLOCK CORRIDORS + ROOMS */
@@ -2770,7 +2580,8 @@ function buildDirectorOffice(batch, M, cx, cy, cz, ry, w, d) {
   batch.box(mat(M, 'officeScreen', 'lampGlow'), 1.0, 0.58, 0.01, w / 4, 2.0, -d / 2 + 0.1);
 
   // Coffee table + armchairs
-  batch.box(mat(M, 'glass', 'glassTint'), 0.7, 0.04, 0.5, -w / 4, 0.42, -d / 4);
+  coffeeTable(batch, -w / 4, 0, -d / 4, 0);
+  armchair(batch, -w / 4 + 0.9, 0, -d / 4, -Math.PI / 2);
   sofa(batch, M, -w / 4, 0, -d / 4 - 1.2, 0);
 
   // Flags
@@ -2964,6 +2775,8 @@ export function buildInteriors(scene, M, colliders) {
   const group = new THREE.Group();
   group.name = 'interiors';
   group.position.y = PODIUM;
+  _interiorGroup = group;
+  _interiorPending = [];
   const batch = new Batch();
 
   // Central hall with marble floor, columns, ceiling
@@ -3016,15 +2829,16 @@ export function buildInteriors(scene, M, colliders) {
     interiorLights.push(l);
   };
 
-  // Entrance lobby: warm reception desk accent, turnstiles/chandelier center, cool vestibule sky fill
-  addLight(-3.1, 2.75, 8.8, 0xffebd0, 0.38, 13);
-  addLight(0, 2.95, 9.6, 0xfff6e8, 0.44, 20);
-  addLight(0.8, 2.95, 14.5, 0xe4f1ff, 0.30, 18);
+  // Entrance lobby: warm reception desk pool, turnstiles/chandelier center, vestibule soffit pool
+  addLight(-3.4, 2.75, 10.65, 0xffebd0, 0.36, 12);
+  addLight(0, 2.95, 9.6, 0xfff3de, 0.42, 18);
+  addLight(0, 3.25, 16.6, 0xffe8c8, 0.36, 12);
 
-  // Rotunda hall across 1st, 2nd, 3rd floors (staggered around central elevator shaft)
-  addLight(0, FLOOR[0] + 2.95, 3.8, 0xfff5e4, 0.42, 20);
-  addLight(0, FLOOR[1] + 2.95, -3.8, 0xfff6ea, 0.42, 20);
-  addLight(0, FLOOR[2] + 2.95, 3.8, 0xfffaf0, 0.40, 20);
+  // Rotunda hall across 1st, 2nd, 3rd, 4th floors (staggered around central elevator shaft)
+  addLight(0, FLOOR[0] + 2.95, 3.8, 0xfff1dc, 0.40, 18);
+  addLight(0, FLOOR[1] + 2.95, -3.8, 0xfff2de, 0.40, 18);
+  addLight(0, FLOOR[2] + 2.95, 3.8, 0xfff4e2, 0.38, 18);
+  addLight(0, FLOOR[3] + 2.95, -3.8, 0xfff4e2, 0.36, 18);
 
   // Floor 1 — Dispatch Center + Block corridor
   addLight(-27.0, 2.9, -4.55, 0xf2f8ff, 0.38, 18);
@@ -3076,7 +2890,7 @@ export function buildInteriors(scene, M, colliders) {
           im.emissiveMap = g.arrowIdleTex;
           im.needsUpdate = true;
         }
-        im.emissiveIntensity = 1.40;
+        im.emissiveIntensity = 0.88;
       }
     }
 
@@ -3098,7 +2912,7 @@ export function buildInteriors(scene, M, colliders) {
       g.rightPivot.rotation.y = -swing;
 
       if (trigger || g.open > 0.25) {
-        const pulse = 1.65 + 0.55 * Math.sin(elapsed * 6.5);
+        const pulse = 1.05 + 0.25 * Math.sin(elapsed * 6.5);
         for (const im of [g.leftIndMat, g.rightIndMat]) {
           if (im.map !== g.arrowActiveTex) {
             im.map = g.arrowActiveTex;
@@ -3128,8 +2942,9 @@ export function buildInteriors(scene, M, colliders) {
   group.userData.elevator = {
     cabin: elevator.cabin,
     doorParts: elevator.doorParts,
-    levels: [PODIUM + FLOOR[0], PODIUM + FLOOR[1], PODIUM + FLOOR[2]],
+    levels: [PODIUM + FLOOR[0], PODIUM + FLOOR[1], PODIUM + FLOOR[2], PODIUM + FLOOR[3]],
   };
+  group.userData.ready = Promise.all(_interiorPending);
 
   return group;
 }
