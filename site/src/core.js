@@ -232,15 +232,113 @@ export const TEX = {
   },
   marble() {
     if (T.marble) return T.marble;
-    T.marble = procedural(512, (u, v) => {
-      const turb = fbm(u * 6, v * 6, 5);
-      const vein = Math.abs(Math.sin((u * 2.2 + v * 1.1 + turb * 2.6) * Math.PI * 2));
-      const vv = Math.pow(1 - vein, 14);
-      const n = fbm(u * 70, v * 70, 3);
-      const base = 236 - vv * 46 + (n - 0.5) * 8;
-      return [base, base - 3, base - 9, 0.5 + vv * 0.1];
-    }, { repeat: 3 });
+    const S = 512, cell = 256;
+    T.marble = procedural(S, (u, v, i, j) => {
+      const fx = (i % cell) / cell, fy = (j % cell) / cell;
+      const joint = Math.min(fx, 1 - fx, fy, 1 - fy) < 0.009 ? 1 : 0;
+      const ti = (i / cell) | 0, tj = (j / cell) | 0;
+      const tileSeed = ((ti * 7 + tj * 13) % 4) * 0.23;
+      const turb = fbm(u * 5 + tileSeed, v * 5 + tileSeed * 1.4, 5);
+      const vein1 = Math.abs(Math.sin((u * 2.1 + v * 1.3 + turb * 2.8) * Math.PI * 2));
+      const vein2 = Math.abs(Math.sin((u * 4.2 - v * 2.4 + turb * 3.4) * Math.PI * 2));
+      const vv = Math.pow(1 - vein1, 16) * 0.85 + Math.pow(1 - vein2, 22) * 0.42;
+      const cloud = fbm(u * 12, v * 12, 3);
+      const fine = fbm(u * 90, v * 90, 2);
+      const k = 240 + (cloud - 0.5) * 10 + (fine - 0.5) * 5 - vv * 58;
+      if (joint) return [192, 185, 174, 0.25];
+      return [k, k - 4 - vv * 6, k - 11 - vv * 10, 0.52 - vv * 0.14];
+    }, { repeat: 4 });
+    T.marble.roughness = proceduralRoughness(S, (u, v, i, j) => {
+      const fx = (i % cell) / cell, fy = (j % cell) / cell;
+      const joint = Math.min(fx, 1 - fx, fy, 1 - fy) < 0.009 ? 1 : 0;
+      if (joint) return 0.88;
+      const turb = fbm(u * 5, v * 5, 4);
+      const vein1 = Math.abs(Math.sin((u * 2.1 + v * 1.3 + turb * 2.8) * Math.PI * 2));
+      const vv = Math.pow(1 - vein1, 14);
+      return 0.15 + vv * 0.14 + fbm(u * 35, v * 35, 2) * 0.05;
+    }, { repeat: 4 });
     return T.marble;
+  },
+  neroMarble() {
+    if (T.neroMarble) return T.neroMarble;
+    T.neroMarble = procedural(512, (u, v) => {
+      const turb = fbm(u * 6, v * 6, 5);
+      const vein = Math.abs(Math.sin((u * 2.4 - v * 1.4 + turb * 3.2) * Math.PI * 2));
+      const fineVein = Math.abs(Math.sin((u * 5.1 + v * 3.2 + turb * 2.5) * Math.PI * 2));
+      const vw = Math.pow(1 - vein, 24);
+      const vg = Math.pow(1 - fineVein, 30) * 0.65;
+      const n = fbm(u * 40, v * 40, 3);
+      const base = 22 + n * 10;
+      const r = Math.min(245, base + vw * 175 + vg * 140);
+      const g = Math.min(240, base + 2 + vw * 168 + vg * 110);
+      const b = Math.min(235, base + 5 + vw * 158 + vg * 62);
+      return [r, g, b, 0.52 - vw * 0.12];
+    }, { repeat: 2 });
+    T.neroMarble.roughness = proceduralRoughness(512, (u, v) => {
+      const turb = fbm(u * 6, v * 6, 4);
+      const vein = Math.abs(Math.sin((u * 2.4 - v * 1.4 + turb * 3.2) * Math.PI * 2));
+      return 0.14 + Math.pow(1 - vein, 20) * 0.16 + fbm(u * 40, v * 40, 2) * 0.04;
+    }, { repeat: 2 });
+    return T.neroMarble;
+  },
+  brushedMetal() {
+    if (T.brushedMetal) return T.brushedMetal;
+    T.brushedMetal = procedural(512, (u, v) => {
+      const streak = fbm(u * 6, v * 260, 3);
+      const macro = fbm(u * 18, v * 18, 2);
+      const k = 0.88 + (streak - 0.5) * 0.16 + (macro - 0.5) * 0.06;
+      const c = Math.round(clamp(218 * k, 120, 250));
+      return [c, c, Math.min(255, c + 3), 0.45 + streak * 0.28];
+    }, { repeat: 2 });
+    T.brushedMetal.roughness = proceduralRoughness(512, (u, v) => {
+      return 0.18 + fbm(u * 8, v * 240, 2) * 0.14;
+    }, { repeat: 2 });
+    return T.brushedMetal;
+  },
+  walnutSlat() {
+    if (T.walnutSlat) return T.walnutSlat;
+    const S = 512, slat = 32;
+    T.walnutSlat = procedural(S, (u, v, i) => {
+      const fx = (i % slat) / slat;
+      const groove = fx < 0.18 || fx > 0.88 ? 1 : 0;
+      const si = (i / slat) | 0;
+      const rnd = mulberry32(si * 433 + 17)();
+      const warp = fbm(u * 12 + rnd, v * 6, 4);
+      const grain = Math.sin((u * 70 + warp * 9) * Math.PI) * 0.5 + 0.5;
+      const k = (0.76 + grain * 0.22 + (rnd - 0.5) * 0.14) * (groove ? 0.34 : 1.0);
+      return [148 * k, 96 * k, 62 * k, groove ? 0.12 : 0.68 + grain * 0.16];
+    }, { repeat: 2 });
+    return T.walnutSlat;
+  },
+  leather() {
+    if (T.leather) return T.leather;
+    T.leather = procedural(256, (u, v) => {
+      const cell = fbm(u * 95, v * 95, 3);
+      const fine = fbm(u * 210, v * 210, 2);
+      const k = 0.88 + (cell - 0.5) * 0.18 + (fine - 0.5) * 0.08;
+      const v2 = Math.round(clamp(235 * k, 120, 255));
+      return [v2, v2, v2, 0.42 + cell * 0.36];
+    }, { repeat: 4 });
+    T.leather.roughness = proceduralRoughness(256, (u, v) => {
+      return 0.34 + fbm(u * 95, v * 95, 2) * 0.18;
+    }, { repeat: 4 });
+    return T.leather;
+  },
+  aoDisc() {
+    if (T.aoDisc) return T.aoDisc;
+    const S = 256;
+    const { c, x } = canvas2d(S);
+    const g = x.createRadialGradient(S / 2, S / 2, S * 0.08, S / 2, S / 2, S * 0.5);
+    g.addColorStop(0, 'rgba(10, 12, 18, 0.42)');
+    g.addColorStop(0.5, 'rgba(10, 12, 18, 0.20)');
+    g.addColorStop(0.82, 'rgba(10, 12, 18, 0.05)');
+    g.addColorStop(1, 'rgba(10, 12, 18, 0.0)');
+    x.fillStyle = g;
+    x.fillRect(0, 0, S, S);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    T.aoDisc = t;
+    return T.aoDisc;
   },
   wood() {
     if (T.wood) return T.wood;
@@ -550,8 +648,9 @@ function makePainting() {
 export function makeMaterials(env) {
   const plasterT = TEX.plaster(), stone = TEX.stone(), granite = TEX.granite();
   const paving = TEX.paving(), brick = TEX.brickPaving(), asphalt = TEX.asphalt();
-  const grassT = TEX.grass(), marbleT = TEX.marble(), wood = TEX.wood();
-  const oakLam = TEX.oakLaminate(), walnutT = TEX.walnut();
+  const grassT = TEX.grass(), marbleT = TEX.marble(), neroT = TEX.neroMarble(), wood = TEX.wood();
+  const oakLam = TEX.oakLaminate(), walnutT = TEX.walnut(), walnutSlatT = TEX.walnutSlat();
+  const brushedT = TEX.brushedMetal(), leatherT = TEX.leather();
   const carpet = TEX.carpet(), ceil = TEX.ceiling(), fabricT = TEX.fabric();
   const needleBlue = TEX.needleBlue();
 
@@ -566,7 +665,7 @@ export function makeMaterials(env) {
       color: 0xdecba6, map: plasterT.map, bumpMap: plasterT.bump, bumpScale: 0.3, roughness: 0.95,
     }),
     stone: new THREE.MeshStandardMaterial({
-      color: 0xf6f3ea, map: stone.map, bumpMap: stone.bump, bumpScale: 0.2, roughness: 0.82,
+      color: 0xf7f4eb, map: stone.map, bumpMap: stone.bump, bumpScale: 0.18, roughness: 0.72, envMapIntensity: 0.48,
     }),
     granite: new THREE.MeshStandardMaterial({
       color: 0x9a6858, map: granite.map, bumpMap: granite.bump, bumpScale: 0.5,
@@ -616,18 +715,40 @@ export function makeMaterials(env) {
     hedge: new THREE.MeshStandardMaterial({ color: 0x3a6830, roughness: 0.95, map: TEX.needle().map }),
 
     /* ==================== INTERIOR ==================== */
-    marbleFloor: new THREE.MeshStandardMaterial({
-      color: 0xf0eae0, map: marbleT.map, bumpMap: marbleT.bump, bumpScale: 0.06,
-      roughness: 0.32, metalness: 0.02, envMapIntensity: 0.72, side: THREE.DoubleSide,
+    marbleFloor: new THREE.MeshPhysicalMaterial({
+      color: 0xf4efe6, map: marbleT.map, bumpMap: marbleT.bump, bumpScale: 0.05,
+      roughness: 1.0, roughnessMap: marbleT.roughness, metalness: 0.02,
+      clearcoat: 0.55, clearcoatRoughness: 0.16, envMapIntensity: 0.92, side: THREE.DoubleSide,
+    }),
+    neroMarble: new THREE.MeshPhysicalMaterial({
+      color: 0xffffff, map: neroT.map, bumpMap: neroT.bump, bumpScale: 0.04,
+      roughness: 1.0, roughnessMap: neroT.roughness, metalness: 0.03,
+      clearcoat: 0.72, clearcoatRoughness: 0.12, envMapIntensity: 1.1, side: THREE.DoubleSide,
+    }),
+    brushedSteel: new THREE.MeshStandardMaterial({
+      color: 0xd8dce2, map: brushedT.map, bumpMap: brushedT.bump, bumpScale: 0.03,
+      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.92, envMapIntensity: 1.55,
+    }),
+    darkTitanium: new THREE.MeshStandardMaterial({
+      color: 0x363b44, map: brushedT.map, bumpMap: brushedT.bump, bumpScale: 0.03,
+      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.88, envMapIntensity: 1.25,
+    }),
+    brushedBrass: new THREE.MeshStandardMaterial({
+      color: 0xd9b366, map: brushedT.map, bumpMap: brushedT.bump, bumpScale: 0.025,
+      roughness: 1.0, roughnessMap: brushedT.roughness, metalness: 0.94, envMapIntensity: 1.65,
     }),
     oakLaminate: new THREE.MeshStandardMaterial({
       color: 0xd8b684, map: oakLam.map, bumpMap: oakLam.bump, bumpScale: 0.16,
       roughness: 0.38, metalness: 0, side: THREE.DoubleSide,
     }),
-    plasterWall: new THREE.MeshStandardMaterial({ color: 0xf5f6f8, roughness: 0.88, metalness: 0, envMapIntensity: 0.28, side: THREE.DoubleSide }),
+    plasterWall: new THREE.MeshStandardMaterial({ color: 0xf5f6f8, roughness: 0.86, metalness: 0, envMapIntensity: 0.38, side: THREE.DoubleSide }),
     walnutDoor: new THREE.MeshStandardMaterial({
       color: 0x8a5234, map: walnutT.map, bumpMap: walnutT.bump, bumpScale: 0.25,
-      roughness: 0.46, metalness: 0, envMapIntensity: 0.35,
+      roughness: 0.42, metalness: 0, envMapIntensity: 0.45,
+    }),
+    walnutSlat: new THREE.MeshStandardMaterial({
+      color: 0xffffff, map: walnutSlatT.map, bumpMap: walnutSlatT.bump, bumpScale: 0.35,
+      roughness: 0.44, metalness: 0, envMapIntensity: 0.48,
     }),
     frostedGlass: new THREE.MeshPhysicalMaterial({
       color: 0xe8eef4, metalness: 0, roughness: 0.55, transparent: true, opacity: 0.42,
@@ -635,7 +756,22 @@ export function makeMaterials(env) {
       clearcoat: 0.5, clearcoatRoughness: 0.4,
     }),
     guardDesk: new THREE.MeshStandardMaterial({ color: 0xd4d8e0, roughness: 0.65, metalness: 0.05, envMapIntensity: 0.35 }),
-    leatherBlack: new THREE.MeshStandardMaterial({ color: 0x262932, roughness: 0.48, metalness: 0.04, envMapIntensity: 0.55 }),
+    leatherBlack: new THREE.MeshStandardMaterial({
+      color: 0x22252c, map: leatherT.map, bumpMap: leatherT.bump, bumpScale: 0.08,
+      roughness: 1.0, roughnessMap: leatherT.roughness, metalness: 0.04, envMapIntensity: 0.65,
+    }),
+    leatherCognac: new THREE.MeshStandardMaterial({
+      color: 0x9b5a34, map: leatherT.map, bumpMap: leatherT.bump, bumpScale: 0.09,
+      roughness: 1.0, roughnessMap: leatherT.roughness, metalness: 0.02, envMapIntensity: 0.58,
+    }),
+    leatherEspresso: new THREE.MeshStandardMaterial({
+      color: 0x422e24, map: leatherT.map, bumpMap: leatherT.bump, bumpScale: 0.09,
+      roughness: 1.0, roughnessMap: leatherT.roughness, metalness: 0.03, envMapIntensity: 0.58,
+    }),
+    aoShadow: new THREE.MeshBasicMaterial({
+      map: TEX.aoDisc(), transparent: true, opacity: 0.92, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+    }),
     fabric: new THREE.MeshStandardMaterial({
       color: 0x35445c, map: fabricT.map, bumpMap: fabricT.bump, bumpScale: 0.18, roughness: 0.85, envMapIntensity: 0.25,
     }),
@@ -730,9 +866,13 @@ export function cachedMaterial(opts) {
     opts.depthWrite ?? true,
     opts.envMapIntensity ?? 0.55,
     opts.clearcoat ?? 0,
+    opts.clearcoatRoughness ?? 0,
+    opts.polygonOffset ? 1 : 0,
     opts.toneMapped ?? true,
     opts.map ? opts.map.uuid : '',
     opts.bumpMap ? opts.bumpMap.uuid : '',
+    opts.roughnessMap ? opts.roughnessMap.uuid : '',
+    opts.alphaMap ? opts.alphaMap.uuid : '',
     opts.bumpScale ?? 1,
   ].join('|');
   if (_matPool.has(key)) return _matPool.get(key);
