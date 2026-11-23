@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import {
-  TIME_MODES, createSky, sunDirection, makeMaterials, PODIUM,
+  TIME_MODES, createSky, sunDirection, makeMaterials, updateCachedMaterialsEnv, PODIUM,
 } from './core.js';
 import { buildBuilding, buildInteriorShell } from './building.js';
 import { buildInteriors } from './interior.js';
@@ -150,7 +150,7 @@ function setQuality(q) {
   composer.setSize(window.innerWidth, window.innerHeight);
   composer.setPixelRatio(dpr);
 
-  bloomPass.resolution.set(window.innerWidth, window.innerHeight);
+  bloomPass.resolution.set(Math.round(window.innerWidth * dpr), Math.round(window.innerHeight * dpr));
 
   const shadowRes = q === 'high' ? 2048 : q === 'med' ? 1024 : 512;
   if (sunLight.shadow.mapSize.x !== shadowRes) {
@@ -176,6 +176,7 @@ function setTime(key) {
       M[k].envMap = envTex;
     }
   }
+  updateCachedMaterialsEnv(envTex);
   const sdir = sunDirection(mode);
   sunLight.position.copy(sdir).multiplyScalar(135);
   sunLight.color.setHex(mode.sun);
@@ -192,17 +193,21 @@ function setTime(key) {
   const isNight = !!mode.night;
   const isGolden = key === 'golden';
   const lampPower = isNight ? 18 : isGolden ? 5 : 0;
-  for (const l of nightLights) l.intensity = lampPower;
+  for (const l of nightLights) {
+    l.intensity = lampPower;
+    l.visible = lampPower > 0;
+  }
 
   const intPower = isNight ? 18 : isGolden ? 14 : 12;
   for (const l of interiorLights) {
-    l.intensity = intPower * (l.userData.weight ?? 0.34);
-    l.distance = 32;
-    l.decay = 1.3;
+    l.intensity = intPower * (l.userData.weight ?? 0.40);
+    l.distance = l.userData.dist ?? 22;
+    l.decay = 1.35;
   }
 
   if (M.lampGlow) M.lampGlow.emissiveIntensity = isNight ? 2.6 : isGolden ? 1.6 : 1.2;
-  if (M.lampPanel) M.lampPanel.emissiveIntensity = isNight ? 3.0 : 2.4;
+  if (M.parkLampGlobe) M.parkLampGlobe.emissiveIntensity = isNight ? 2.8 : isGolden ? 1.4 : 0.25;
+  if (M.lampPanel) M.lampPanel.emissiveIntensity = isNight ? 3.2 : 2.6;
 
   // Adjust bloom for night
   bloomPass.strength = isNight ? 0.35 : isGolden ? 0.26 : 0.22;
@@ -221,6 +226,11 @@ const helpBtn = $('btn-help');
 const helpCard = $('help-card');
 const helpText = $('help-text');
 const mobilePad = $('mobile-pad');
+const mobileActions = $('mobile-actions');
+const mobileJumpBtn = $('btn-mobile-jump');
+const mobileElevatorBtn = $('btn-mobile-elevator');
+
+if (isMobile && helpCard) helpCard.classList.add('hidden');
 
 let controller = null;
 
@@ -237,10 +247,13 @@ function syncUI(passedState) {
   if (helpText) {
     helpText.innerHTML = st.mode === 'drone'
       ? '<b>Дрон:</b> WASD — пролёт · Q/E — высота · Shift — быстрее · Мышь — обзор · Колесо — зум'
-      : '<b>Человек:</b> WASD — шаг · Shift — быстрее · Space — прыжок · E — лифт · Посмотрите вниз, чтобы увидеть смокинг';
+      : '<b>Человек:</b> WASD — шаг · Shift — быстрее · Space — прыжок · E — лифт · Клик — захват мыши';
   }
   if (mobilePad) {
     mobilePad.classList.toggle('visible', isMobile && st.mode === 'human');
+  }
+  if (mobileActions) {
+    mobileActions.classList.toggle('visible', isMobile && st.mode === 'human');
   }
 }
 
@@ -302,6 +315,21 @@ if (mobilePad) {
   mobilePad.addEventListener('pointercancel', endPad);
 }
 
+if (mobileJumpBtn) {
+  mobileJumpBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    controller.jump();
+  });
+}
+if (mobileElevatorBtn) {
+  mobileElevatorBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    controller.useElevator();
+  });
+}
+
 /* ------------------------------------------------------------------ resize */
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -352,6 +380,7 @@ function animate(now) {
         pos.setZ(i, base[i * 3 + 2] + Math.sin(u * 6.2 - ph) * 0.14 * u);
       }
       pos.needsUpdate = true;
+      f.geometry.computeVertexNormals();
     }
   }
 

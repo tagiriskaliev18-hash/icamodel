@@ -7,7 +7,7 @@
    Annular balcony floors in rotunda (atrium). */
 
 import * as THREE from 'three';
-import { Batch, DEG, LAYOUT, FLOOR, ROOF, ATTIC, PODIUM, polar, clamp, mulberry32 } from './core.js';
+import { Batch, DEG, LAYOUT, FLOOR, ROOF, ATTIC, PODIUM, polar, clamp, mulberry32, cachedMaterial, addRotundaRing } from './core.js';
 
 const R = LAYOUT.rotunda;
 const B = LAYOUT.block;
@@ -405,7 +405,7 @@ function rotunda(batch, M, group) {
   const fasciaH = 1.24;
   const signSpan = 1.04; // ~60° arc cleanly spanning across the portico front
   const signBackGeo = new THREE.CylinderGeometry(signR - 0.04, signR - 0.04, fasciaH + 0.08, 48, 1, true, -signSpan / 2, signSpan);
-  const signBackMat = new THREE.MeshStandardMaterial({ color: 0x0a3978, roughness: 0.45, metalness: 0.15, side: THREE.DoubleSide });
+  const signBackMat = cachedMaterial({ color: 0x0a3978, roughness: 0.45, metalness: 0.15, side: THREE.DoubleSide });
   const signBack = new THREE.Mesh(signBackGeo, signBackMat);
   signBack.position.y = signY;
   group.add(signBack);
@@ -434,7 +434,7 @@ function rotunda(batch, M, group) {
   ring(r + 0.14, levels * h + 1.65, 0.12, M.stone);
 
   /* ---- RADIO RELAY TOWER ---- */
-  buildRadioTower(batch, M, group);
+  buildRadioTower(batch, M);
 }
 
 function makeSignTexture() {
@@ -486,8 +486,9 @@ function buildRadioTower(batch, M) {
   const towerH = 42;
   const baseW = 2.8, topW = 0.6;
   const sections = 12;
-  const redMat = new THREE.MeshStandardMaterial({ color: 0xcc2020, roughness: 0.65, metalness: 0.3 });
-  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf0f0f0, roughness: 0.6, metalness: 0.3 });
+  const redMat = cachedMaterial({ color: 0xcc2020, roughness: 0.65, metalness: 0.3 });
+  const whiteMat = cachedMaterial({ color: 0xf0f0f0, roughness: 0.6, metalness: 0.3 });
+  const dishMat = cachedMaterial({ color: 0xd0d0d0, roughness: 0.5, metalness: 0.3 });
 
   for (let s = 0; s < sections; s++) {
     const t0 = s / sections, t1 = (s + 1) / sections;
@@ -516,7 +517,6 @@ function buildRadioTower(batch, M) {
   // Dish antennas on the tower
   for (const y of [ROOF + towerH * 0.4, ROOF + towerH * 0.65, ROOF + towerH * 0.85]) {
     const dishGeo = new THREE.CylinderGeometry(0.6, 0.8, 0.2, 12);
-    const dishMat = new THREE.MeshStandardMaterial({ color: 0xd0d0d0, roughness: 0.5, metalness: 0.3 });
     const p = { x: tx + baseW * 0.3, z: tz };
     batch.add(dishGeo, dishMat, new THREE.Matrix4().compose(
       new THREE.Vector3(p.x, y, p.z),
@@ -714,6 +714,21 @@ function galleryMass(batch, M) {
 }
 
 /* ----------------------------------------------------------- grand stair */
+const _upAxis = new THREE.Vector3(0, 1, 0);
+function addCylinderBetween(batch, mat, x0, y0, z0, x1, y1, z1, radius, seg = 6) {
+  const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1e-4) return;
+  const dir = new THREE.Vector3(dx / len, dy / len, dz / len);
+  const q = new THREE.Quaternion().setFromUnitVectors(_upAxis, dir);
+  const m = new THREE.Matrix4().compose(
+    new THREE.Vector3((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2),
+    q,
+    new THREE.Vector3(1, 1, 1)
+  );
+  batch.add(new THREE.CylinderGeometry(radius, radius, len, seg), mat, m);
+}
+
 function stair(batch, M, colliders) {
   const azr = LAYOUT.entry.az * DEG;
   const dirX = Math.sin(azr), dirZ = -Math.cos(azr);
@@ -746,36 +761,64 @@ function stair(batch, M, colliders) {
       // Post
       batch.cyl(M.chrome, 0.025, 0.025, 0.9, 6, q.x, y - 0.45, q.z);
     }
-    // Handrail
+    // Handrail (angled along stair slope)
     for (let i = 0; i < steps; i++) {
       const r0 = startR + i * run, r1 = startR + (i + 1) * run;
       const y0 = (steps - i) * rise + 0.9, y1 = (steps - i - 1) * rise + 0.9;
       const p0 = polar(azr + (sgn * (width / 2 + 0.1)) / r0, r0);
       const p1 = polar(azr + (sgn * (width / 2 + 0.1)) / r1, r1);
-      const mx = (p0.x + p1.x) / 2, my = (y0 + y1) / 2, mz = (p0.z + p1.z) / 2;
-      const railLen = Math.hypot(p1.x - p0.x, p1.z - p0.z, y1 - y0);
-      batch.cyl(M.chrome, 0.022, 0.022, railLen, 6, mx, my, mz);
+      addCylinderBetween(batch, M.chrome, p0.x, y0, p0.z, p1.x, y1, p1.z, 0.022, 6);
     }
   }
 
-  // Side ramp (ADA accessibility)
+  // Side ramp (ADA accessibility, properly sloped from PODIUM down to ground)
   const rampW = 2.0;
-  const rampLen = steps * run * 2.4;
-  const rampP = polar(azr + (width / 2 + rampW / 2 + 1.0) / (startR + steps * run / 2), startR + rampLen / 2);
-  batch.box(M.granite, rampW, 0.12, rampLen, rampP.x, PODIUM / 2, rampP.z, Math.atan2(dirX, dirZ));
-  // Ramp railings
+  const horizLen = steps * run * 2.4;
+  const slopeLen = Math.hypot(horizLen, PODIUM);
+  const slopeAngle = Math.atan2(PODIUM, horizLen);
+  const sideX = -dirZ, sideZ = dirX;
+  const latOff = width / 2 + rampW / 2 + 1.0;
+  const topX = dirX * startR + sideX * latOff;
+  const topZ = dirZ * startR + sideZ * latOff;
+  const botX = topX + dirX * horizLen;
+  const botZ = topZ + dirZ * horizLen;
+  const rmx = (topX + botX) / 2;
+  const rmz = (topZ + botZ) / 2;
+  const rampRy = Math.atan2(dirX, dirZ);
+
+  // Sloped ramp deck + top landing connecting to gallery podium
+  batch.box(M.granite, rampW, 0.14, slopeLen, rmx, PODIUM / 2 - 0.07, rmz, rampRy, slopeAngle);
+  batch.box(M.granite, rampW + 0.6, 0.16, 2.8, topX + dirX * -1.4, PODIUM - 0.08, topZ + dirZ * -1.4, rampRy);
+  batch.box(M.graniteDark, rampW + 0.5, PODIUM - 0.16, 2.7, topX + dirX * -1.4, (PODIUM - 0.16) / 2, topZ + dirZ * -1.4, rampRy);
+
+  // Sloped ramp railings & posts on both sides
   for (const side of [-1, 1]) {
-    const rx = rampP.x + side * rampW / 2 * dirZ;
-    const rz = rampP.z - side * rampW / 2 * dirX;
-    batch.cyl(M.chrome, 0.025, 0.025, 1.0, 6, rx, PODIUM / 2 + 0.5, rz);
+    const offX = side * (rampW / 2 - 0.06) * sideX;
+    const offZ = side * (rampW / 2 - 0.06) * sideZ;
+    const nPosts = 5;
+    for (let k = 0; k <= nPosts; k++) {
+      const t = k / nPosts;
+      const px = topX + offX + (botX - topX) * t;
+      const pz = topZ + offZ + (botZ - topZ) * t;
+      const py = PODIUM * (1 - t);
+      batch.cyl(M.chrome, 0.025, 0.025, 0.9, 6, px, py + 0.45, pz);
+    }
+    addCylinderBetween(
+      batch, M.chrome,
+      topX + offX, PODIUM + 0.9, topZ + offZ,
+      botX + offX, 0.9, botZ + offZ,
+      0.022, 6
+    );
   }
 
   // Landing platform at bottom
   const lp = polar(azr, startR + steps * run + 1.4);
   batch.box(M.paver, width + 5, 0.12, 3.2, lp.x, 0.06, lp.z, Math.atan2(dirX, dirZ));
 
-  // Collider for the stair
+  // Colliders for main stair, ADA ramp, and ADA top landing
   colliders.push({ type: 'ramp', az: azr, r0: startR, r1: startR + steps * run, width, y0: 0, y1: PODIUM });
+  colliders.push({ type: 'ramp', az: azr, r0: startR, r1: startR + horizLen, width: rampW, sideOffset: latOff, y0: 0, y1: PODIUM });
+  colliders.push({ type: 'floorRect', x0: -11.0, x1: -7.5, z0: 15.8, z1: startR + 0.2, y: PODIUM });
 }
 
 /* ------------------------------------------------------------ assemble */
@@ -832,6 +875,39 @@ export function buildBuilding(scene, M, colliders) {
     colliders.push({ type: 'circle', x: p.x, z: p.z, r: 1.2, y0: PODIUM, y1: ROOF + PODIUM });
   }
 
+  // Gallery curved storefront wall colliders (keep central entrance portal 180° ± 12° open)
+  const galSegs = 20;
+  for (let i = 0; i < galSegs; i++) {
+    const deg = G.a0 + ((G.a1 - G.a0) * (i + 0.5)) / galSegs;
+    if (Math.abs(deg - 180) <= 12) continue;
+    const p = polar(deg * DEG, G.r1 - 0.18);
+    colliders.push({ type: 'circle', x: p.x, z: p.z, r: 1.15, y0: 0, y1: G.h + PODIUM });
+  }
+
+  // Block wing exterior wall box colliders (preserving central east corridor z = -2.2..1.2)
+  const wallTop = ROOF + PODIUM;
+  colliders.push({ type: 'rect', x0: B.x0 - 0.25, x1: B.x1 + 0.25, z0: B.z0 - 0.35, z1: B.z0 + 0.25, y0: 0, y1: wallTop });
+  colliders.push({ type: 'rect', x0: B.x0 - 0.25, x1: B.x1 + 0.25, z0: B.z1 - 0.25, z1: B.z1 + 0.35, y0: 0, y1: wallTop });
+  colliders.push({ type: 'rect', x0: B.x0 - 0.35, x1: B.x0 + 0.25, z0: B.z0 - 0.25, z1: B.z1 + 0.25, y0: 0, y1: wallTop });
+  colliders.push({ type: 'rect', x0: B.x1 - 0.25, x1: B.x1 + 0.25, z0: B.z0, z1: -2.2, y0: 0, y1: wallTop });
+  colliders.push({ type: 'rect', x0: B.x1 - 0.25, x1: B.x1 + 0.25, z0: 1.2, z1: B.z1, y0: 0, y1: wallTop });
+
+  // Angled NE wing exterior wall colliders (OBB, leaving rotunda SW passage open)
+  {
+    const a = W.az, ax = Math.sin(a), az = -Math.cos(a);
+    const nx = Math.cos(a), nz = Math.sin(a);
+    const ws0 = 7.4, ws1 = W.s1;
+    const sMid = (ws0 + ws1) / 2;
+    const halfLen = (ws1 - ws0) / 2;
+    for (const side of [-1, 1]) {
+      const cx = ax * sMid + nx * (side * W.half);
+      const cz = az * sMid + nz * (side * W.half);
+      colliders.push({ type: 'obb', cx, cz, ux: ax, uz: az, halfW: halfLen, halfD: 0.28, y0: 0, y1: wallTop });
+    }
+    const endCx = ax * ws1, endCz = az * ws1;
+    colliders.push({ type: 'obb', cx: endCx, cz: endCz, ux: ax, uz: az, halfW: 0.28, halfD: W.half + 0.25, y0: 0, y1: wallTop });
+  }
+
   scene.add(group);
   return group;
 }
@@ -861,10 +937,8 @@ export function buildInteriorShell(scene, M) {
       const disc = new THREE.CylinderGeometry(R.hall, R.hall, 0.16, 64);
       batch.add(disc, M.marbleFloor, new THREE.Matrix4().makeTranslation(0, y - 0.08, 0));
     } else {
-      // Upper rotunda levels — annular marble gallery leaving elevator shaft open
-      const ring = new THREE.RingGeometry(R.core + 0.04, R.hall, 64);
-      ring.rotateX(-Math.PI / 2);
-      batch.add(ring, M.marbleFloor, new THREE.Matrix4().makeTranslation(0, y, 0));
+      // Upper rotunda levels — annular marble gallery leaving elevator shaft & grand stairwells open
+      addRotundaRing(batch, M.marbleFloor, R.core + 0.04, R.hall, y, false, i === 1 || i === 2);
     }
     // Wing floor — warm light oak laminate
     batch.box(M.oakLaminate, W.half * 2 - 0.2, 0.16, W.s1 - wS0, ax * (wS0 + W.s1) / 2, y - 0.08, az * (wS0 + W.s1) / 2, wRy);
@@ -880,10 +954,8 @@ export function buildInteriorShell(scene, M) {
     batch.box(M.ceiling, B.x1 - B.x0 - 0.2, 0.04, B.z1 - B.z0 - 0.2, (B.x0 + B.x1) / 2, cy, (B.z0 + B.z1) / 2);
     batch.box(M.ceiling, 1.4, 0.04, 3.6, -8.8, cy, -0.5);
     batch.box(M.ceiling, W.half * 2 - 0.3, 0.04, W.s1 - wS0, ax * (wS0 + W.s1) / 2, cy, az * (wS0 + W.s1) / 2, wRy);
-    // Rotunda ceiling (white Armstrong ring on every floor)
-    const rCeil = new THREE.RingGeometry(R.core + 0.04, R.hall, 64);
-    rCeil.rotateX(Math.PI / 2);
-    batch.add(rCeil, M.ceiling, new THREE.Matrix4().makeTranslation(0, cy, 0));
+    // Rotunda ceiling (white Armstrong ring on every floor, open above grand stairwells on levels 0 & 1)
+    addRotundaRing(batch, M.ceiling, R.core + 0.04, R.hall, cy, true, i === 0 || i === 1);
   }
   // Rotunda roof cap
   batch.add(new THREE.CylinderGeometry(R.hall, R.hall, 0.06, 64), M.ceiling, new THREE.Matrix4().makeTranslation(0, ROOF - 0.08, 0));

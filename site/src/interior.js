@@ -7,7 +7,7 @@
    .userData.lights and an .update(dt, playerPos) for animated turnstiles & lift doors. */
 
 import * as THREE from 'three';
-import { Batch, DEG, LAYOUT, FLOOR, PODIUM, polar, mulberry32, clamp } from './core.js';
+import { Batch, DEG, LAYOUT, FLOOR, PODIUM, polar, mulberry32, clamp, cachedMaterial, addRotundaRing } from './core.js';
 
 const B = LAYOUT.block;
 const W = LAYOUT.wing;
@@ -21,8 +21,18 @@ const CORR_Z = -0.5; // block corridor center-line z
 /* ---- safe material helpers ---- */
 const mat = (M, ...keys) => {
   for (const k of keys) if (M[k]) return M[k];
-  return M.stone || new THREE.MeshStandardMaterial({ color: 0xcccccc });
+  return M.stone || cachedMaterial({ color: 0xcccccc });
 };
+
+const _labelMatCache = new Map();
+function getLabelMat(text, w = 512, h = 128, bgColor = '#1a3a6c', fgColor = '#ffffff') {
+  const key = `${text}|${w}|${h}|${bgColor}|${fgColor}`;
+  if (_labelMatCache.has(key)) return _labelMatCache.get(key);
+  const tex = makeCanvasLabel(text, w, h, bgColor, fgColor);
+  const m = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
+  _labelMatCache.set(key, m);
+  return m;
+}
 
 /* ---- nested parent-matrix stack helper (never clobbers outer room transform!) ---- */
 function pushParent(batch, m4) {
@@ -131,7 +141,7 @@ function fileCabinet(batch, M, x, y, z, ry = 0) {
   for (let i = 0; i < 4; i++) {
     for (let j = 0; j < 5; j++) {
       const c = cols[(i * 5 + j) % cols.length];
-      const bm = new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 });
+      const bm = cachedMaterial({ color: c, roughness: 0.8 });
       batch.box(bm, 0.06, 0.28, 0.24, -0.3 + j * 0.14, 0.46 + i * 0.42, -0.04);
     }
   }
@@ -141,7 +151,7 @@ function fileCabinet(batch, M, x, y, z, ry = 0) {
 function waterCooler(batch, M, x, y, z) {
   batch.box(mat(M, 'stone', 'metalWhite'), 0.36, 1.0, 0.36, x, y + 0.5, z);
   // blue water bottle
-  batch.cyl(new THREE.MeshStandardMaterial({ color: 0x3388cc, transparent: true, opacity: 0.5, roughness: 0.3 }),
+  batch.cyl(cachedMaterial({ color: 0x3388cc, transparent: true, opacity: 0.5, roughness: 0.3 }),
     0.14, 0.14, 0.44, 12, x, y + 1.22, z);
 }
 
@@ -335,9 +345,7 @@ function door(batch, M, x, z, ry, opts = {}) {
     open ? w / 2 + 0.1 : w / 3, h * 0.42, open ? 0.15 : 0.05);
   // label plate above door
   if (label) {
-    const tex = makeCanvasLabel(label, 512, 96, '#1a3a6c');
-    const lm = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
-    batch.box(lm, 0.5, 0.12, 0.02, 0, h + 0.18, 0.09);
+    batch.box(getLabelMat(label, 512, 96, '#1a3a6c'), 0.5, 0.12, 0.02, 0, h + 0.18, 0.09);
   }
   batch.setParent(prev);
 }
@@ -391,14 +399,12 @@ function fireCabinet(batch, M, x, y, z, ry = 0) {
   // red stripe
   batch.box(mat(M, 'fireRed', 'metalDark'), 0.56, 0.08, 0.01, 0, 0.3, 0.1);
   // ПК-6 label
-  const tex = makeCanvasLabel('ПК-6 / 101', 256, 64, '#cc2222');
-  const lm = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
-  batch.box(lm, 0.3, 0.08, 0.01, 0, 0.5, 0.1);
+  batch.box(getLabelMat('ПК-6 / 101', 256, 64, '#cc2222'), 0.3, 0.08, 0.01, 0, 0.5, 0.1);
   batch.setParent(prev);
 }
 
 function painting(batch, M, x, y, z, ry = 0, w = 0.7, h = 0.5) {
-  batch.box(mat(M, 'wood'), w + 0.08, h + 0.08, 0.03, x, y, z, ry);
+  batch.box(mat(M, 'woodLight', 'walnutDoor'), w + 0.08, h + 0.08, 0.03, x, y, z, ry);
   batch.box(mat(M, 'painting', 'lampGlow'), w - 0.04, h - 0.04, 0.01, x, y, z, ry);
 }
 
@@ -410,7 +416,7 @@ function flag(batch, M, x, y, z, color = 0x0066cc, ry = 0) {
   const prev = pushParent(batch, m4);
   batch.cyl(mat(M, 'chrome', 'metalDark'), 0.02, 0.025, 2.15, 8, 0, 1.075, 0);
   batch.cyl(mat(M, 'metalDark'), 0.15, 0.19, 0.08, 10, 0, 0.04, 0);
-  const fm = new THREE.MeshStandardMaterial({ color, roughness: 0.72, side: THREE.DoubleSide });
+  const fm = cachedMaterial({ color, roughness: 0.72, side: THREE.DoubleSide });
   batch.box(fm, 0.72, 0.46, 0.015, 0.38, 1.84, 0);
   batch.setParent(prev);
 }
@@ -424,12 +430,20 @@ function buildTurnstiles(scene, y) {
   const positions = [-1.6, 0, 1.6]; // 3 passages
   const gates = [];
 
+  const bollardMat = cachedMaterial({ color: 0xd0d0d0, metalness: 0.7, roughness: 0.25 });
+  const ledMat = cachedMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 1.5 });
+  const gateMat = cachedMaterial({
+    type: 'physical',
+    color: 0xddeeff, transparent: true, opacity: 0.45, roughness: 0.05, metalness: 0.1,
+    clearcoat: 1, side: THREE.DoubleSide, depthWrite: false,
+  });
+
   for (let i = 0; i <= positions.length; i++) {
     // bollard/post
     const bx = i === 0 ? -2.4 : i === positions.length ? 2.4 : (positions[i - 1] + positions[i]) / 2;
     const bollard = new THREE.Mesh(
       new THREE.BoxGeometry(0.3, 1.0, 0.5),
-      new THREE.MeshStandardMaterial({ color: 0xd0d0d0, metalness: 0.7, roughness: 0.25 })
+      bollardMat
     );
     bollard.position.set(bx, 0.5, turnstileZ);
     bollard.castShadow = true;
@@ -437,7 +451,7 @@ function buildTurnstiles(scene, y) {
     // green LED strip
     const led = new THREE.Mesh(
       new THREE.BoxGeometry(0.24, 0.04, 0.02),
-      new THREE.MeshStandardMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 1.5 })
+      ledMat
     );
     led.position.set(bx, 0.9, turnstileZ + 0.26);
     group.add(led);
@@ -445,10 +459,6 @@ function buildTurnstiles(scene, y) {
 
   // glass gates (animated)
   for (const px of positions) {
-    const gateMat = new THREE.MeshPhysicalMaterial({
-      color: 0xddeeff, transparent: true, opacity: 0.45, roughness: 0.05, metalness: 0.1,
-      clearcoat: 1, side: THREE.DoubleSide, depthWrite: false
-    });
     const leftGate = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.9, 0.02), gateMat);
     leftGate.position.set(px - 0.2, 0.5, turnstileZ);
     const rightGate = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.9, 0.02), gateMat);
@@ -561,26 +571,25 @@ function buildElevator(batch, M, parentGroup, colliders) {
 
   // Sliding doors on each floor (facing south +Z) — added to parentGroup so Y aligns with PODIUM!
   const doorParts = [];
+  const elevDoorMat = cachedMaterial({ color: 0xd0d4dc, metalness: 0.75, roughness: 0.22 });
+  const callBtnMat = cachedMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 1.0 });
   for (let lv = 0; lv < 3; lv++) {
     const fy = FLOOR[lv];
-    const doorMat = new THREE.MeshStandardMaterial({ color: 0xd0d4dc, metalness: 0.75, roughness: 0.22 });
-    const leftDoor = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2.3, 0.04), doorMat);
+    const leftDoor = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2.3, 0.04), elevDoorMat);
     leftDoor.position.set(-0.28, fy + 1.15, shaftR + 0.04);
     leftDoor.castShadow = true;
-    const rightDoor = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2.3, 0.04), doorMat);
+    const rightDoor = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2.3, 0.04), elevDoorMat);
     rightDoor.position.set(0.28, fy + 1.15, shaftR + 0.04);
     rightDoor.castShadow = true;
     parentGroup.add(leftDoor, rightDoor);
     doorParts.push({ left: leftDoor, right: rightDoor, level: lv, baseX: [-0.28, 0.28], open: 0 });
 
     // Floor indicator panel
-    const panelTex = makeCanvasLabel(`${lv + 1}`, 128, 128, '#1a1a1a', '#00ff88');
-    const panelMat = new THREE.MeshBasicMaterial({ map: panelTex, toneMapped: false });
-    batch.box(panelMat, 0.15, 0.15, 0.02, 0.65, fy + 2.5, shaftR + 0.08);
+    batch.box(getLabelMat(`${lv + 1}`, 128, 128, '#1a1a1a', '#00ff88'), 0.15, 0.15, 0.02, 0.65, fy + 2.5, shaftR + 0.08);
 
     // Call button
     batch.box(mat(M, 'chrome', 'metalDark'), 0.08, 0.08, 0.03, 0.65, fy + 1.1, shaftR + 0.08);
-    batch.box(new THREE.MeshStandardMaterial({ color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 1.0 }),
+    batch.box(callBtnMat,
       0.04, 0.04, 0.01, 0.65, fy + 1.1, shaftR + 0.1);
   }
 
@@ -589,20 +598,20 @@ function buildElevator(batch, M, parentGroup, colliders) {
   cabin.name = 'elevator-cabin';
   const cabinFloor = new THREE.Mesh(
     new THREE.CylinderGeometry(shaftR - 0.15, shaftR - 0.15, 0.08, 24),
-    new THREE.MeshStandardMaterial({ color: 0xd0ccc0, roughness: 0.5 })
+    cachedMaterial({ color: 0xd0ccc0, roughness: 0.5 })
   );
   cabin.add(cabinFloor);
   const cabinLight = new THREE.PointLight(0xfff4e0, 2.2, 8, 1.4);
   cabinLight.position.y = 2.5;
   cabin.add(cabinLight);
   const railGeo = new THREE.TorusGeometry(shaftR - 0.25, 0.02, 8, 24, Math.PI);
-  const railMat = new THREE.MeshStandardMaterial({ color: 0xc0c0c0, metalness: 0.8, roughness: 0.2 });
+  const railMat = cachedMaterial({ color: 0xc0c0c0, metalness: 0.8, roughness: 0.2 });
   const rail = new THREE.Mesh(railGeo, railMat);
   rail.rotation.x = Math.PI / 2;
   rail.position.set(0, 1.0, 0);
   cabin.add(rail);
   const mirrorGeo = new THREE.PlaneGeometry(1.0, 1.6);
-  const mirrorMat = new THREE.MeshStandardMaterial({ color: 0xeeeef4, metalness: 0.9, roughness: 0.05 });
+  const mirrorMat = cachedMaterial({ color: 0xeeeef4, metalness: 0.9, roughness: 0.05 });
   const mirror = new THREE.Mesh(mirrorGeo, mirrorMat);
   mirror.position.set(0, 1.3, -(shaftR - 0.2));
   cabin.add(mirror);
@@ -630,17 +639,16 @@ function hall(batch, M, colliders) {
 
   for (let lv = 0; lv < 3; lv++) {
     const y = FLOOR[lv];
-    // polished marble floor — annular ring on upper floors so elevator shaft stays clear!
+    // polished marble floor — annular ring on upper floors with stairwell cutouts (20°..160°, 200°..340°)
     if (lv === 0) {
       batch.add(new THREE.CylinderGeometry(r - 0.1, r - 0.1, 0.04, 72),
         marbleMat, new THREE.Matrix4().makeTranslation(0, y + 0.02, 0));
     } else {
-      const mRing = new THREE.RingGeometry(R.core + 0.06, r - 0.1, 72);
-      mRing.rotateX(-Math.PI / 2);
-      batch.add(mRing, marbleMat, new THREE.Matrix4().makeTranslation(0, y + 0.02, 0));
+      addRotundaRing(batch, marbleMat, R.core + 0.06, r - 0.1, y + 0.02, false, true);
     }
-    // decorative concentric ring ornament
-    for (const rr of [r - 2.0, r - 1.5, 5.0, 3.0]) {
+    // decorative concentric ring ornament (skip stairwell band on upper floors)
+    const ringRadii = lv === 0 ? [r - 2.0, r - 1.5, 5.0, 3.0] : [r - 1.5, 3.0];
+    for (const rr of ringRadii) {
       const ring = new THREE.TorusGeometry(rr, 0.03, 8, 64);
       ring.rotateX(Math.PI / 2);
       batch.add(ring, mat(M, 'graniteDark', 'granite'),
@@ -657,13 +665,11 @@ function hall(batch, M, colliders) {
       colliders.push({ type: 'circle', x: p.x, z: p.z, r: 0.4, y0: PODIUM + y, y1: PODIUM + y + WALL_H });
     }
 
-    // Bright white Armstrong ceiling ring + recessed LED panels (cleanly at y + 3.36, below floor slab above!)
-    const ringC = new THREE.RingGeometry(R.core + 0.06, r - 0.1, 72, 1);
-    ringC.rotateX(Math.PI / 2);
-    batch.add(ringC, mat(M, 'ceiling', 'stone'), new THREE.Matrix4().makeTranslation(0, y + 3.36, 0));
+    // Bright white Armstrong ceiling ring (with stairwell cutouts on levels 0 & 1) + recessed LED panels
+    addRotundaRing(batch, mat(M, 'ceiling', 'stone'), R.core + 0.06, r - 0.1, y + 3.36, true, lv < 2);
     for (let i = 0; i < 16; i++) {
       const a = (i / 16) * Math.PI * 2;
-      const p = polar(a, r - 1.9);
+      const p = polar(a, r - 1.55);
       batch.box(mat(M, 'lampPanel', 'lampGlow'), 1.05, 0.04, 0.5, p.x, y + 3.33, p.z, -a);
     }
   }
@@ -708,15 +714,15 @@ function guardPost(batch, M, colliders) {
   batch.box(mat(M, 'stone'), 0.34, 0.03, 0.42, 0.12, 1.135, 0.08);
 
   // Guard figure standing BEHIND the desk (local z = -0.42) FACING visitor (+Z)!
-  const skinMat = new THREE.MeshStandardMaterial({ color: 0xd4a47e, roughness: 0.55 });
-  const uniformMat = new THREE.MeshStandardMaterial({ color: 0x1b2b52, roughness: 0.68 });
-  const shirtMat = new THREE.MeshStandardMaterial({ color: 0xeef2f8, roughness: 0.7 });
+  const skinMat = cachedMaterial({ color: 0xd4a47e, roughness: 0.55 });
+  const uniformMat = cachedMaterial({ color: 0x1b2b52, roughness: 0.68 });
+  const shirtMat = cachedMaterial({ color: 0xeef2f8, roughness: 0.7 });
   const guardZ = -0.44;
   // Torso & white collar
   batch.box(uniformMat, 0.46, 0.56, 0.28, 0, 1.28, guardZ);
   batch.box(shirtMat, 0.16, 0.18, 0.29, 0, 1.48, guardZ + 0.01);
   // Badge on chest
-  batch.box(new THREE.MeshStandardMaterial({ color: 0xe8c448, metalness: 0.8, roughness: 0.25 }),
+  batch.box(cachedMaterial({ color: 0xe8c448, metalness: 0.8, roughness: 0.25 }),
     0.07, 0.07, 0.02, 0.12, 1.42, guardZ + 0.15);
   // Shoulders & arms reaching onto counter
   batch.box(uniformMat, 0.14, 0.36, 0.14, -0.28, 1.26, guardZ + 0.06);
@@ -912,7 +918,7 @@ function buildDispatchRoom(batch, M, x0, x1, zNear, zFar, y) {
   // Curved 5-panel glowing SCADA video wall mounted prominently on the SOLID WEST END WALL (facing +X!)
   const scadaMat = mat(M, 'scadaScreen', 'lampGlow');
   const frameMat = mat(M, 'metalDark');
-  const cyanAccent = new THREE.MeshStandardMaterial({ color: 0x00e8ff, emissive: 0x00d8ff, emissiveIntensity: 1.4, roughness: 0.3 });
+  const cyanAccent = cachedMaterial({ color: 0x00e8ff, emissive: 0x00d8ff, emissiveIntensity: 1.4, roughness: 0.3 });
   const wallX = x0 + 0.35; // -32.85
   const segs = 5;
   const totalArcW = 4.3;
@@ -972,7 +978,7 @@ function buildDispatchRoom(batch, M, x0, x1, zNear, zFar, y) {
     batch.box(frameMat, 0.72, 2.05, 0.65, rx, y + 1.025, rz);
     for (let i = 0; i < 9; i++) {
       const ledColor = i % 3 === 0 ? 0x00ff66 : i % 3 === 1 ? 0x00d8ff : 0xffaa22;
-      batch.box(new THREE.MeshStandardMaterial({ color: ledColor, emissive: ledColor, emissiveIntensity: 2.0 }),
+      batch.box(cachedMaterial({ color: ledColor, emissive: ledColor, emissiveIntensity: 2.0 }),
         0.045, 0.025, 0.015, rx - 0.18 + (i % 3) * 0.16, y + 0.35 + i * 0.18, rz - 0.33);
     }
   }
@@ -984,9 +990,7 @@ function buildDispatchRoom(batch, M, x0, x1, zNear, zFar, y) {
   }
 
   // Digital clock above SCADA video wall
-  const clockTex = makeCanvasLabel('14:35 · УМГ УРАЛЬСК', 512, 96, '#081b36', '#00f5ff');
-  const clockMat = new THREE.MeshBasicMaterial({ map: clockTex, toneMapped: false });
-  batch.box(clockMat, 1.3, 0.24, 0.04, wallX + 0.06, y + 3.08, cz, Math.PI / 2);
+  batch.box(getLabelMat('14:35 · УМГ УРАЛЬСК', 512, 96, '#081b36', '#00f5ff'), 1.3, 0.24, 0.04, wallX + 0.06, y + 3.08, cz, Math.PI / 2);
 }
 
 /* ============================================================ ASSEMBLY HALL */
@@ -1042,7 +1046,7 @@ function buildAssemblyHall(batch, M, x0, x1, zNear, zFar, y, colliders) {
   batch.cyl(mat(M, 'chrome'), 0.01, 0.01, 0.26, 6, podX - 0.12, y + 0.14 + 1.28, podZ);
 
   // Central aisle carpet runner (deep corporate blue)
-  batch.box(new THREE.MeshStandardMaterial({ color: 0x16427a, roughness: 0.9 }),
+  batch.box(cachedMaterial({ color: 0x16427a, roughness: 0.9 }),
     10.8, 0.015, 0.92, x0 + 10.6, y + 0.025, cz);
 
   // 7 neat rows of conference chairs (3 left + 3 right of central aisle), facing -X toward stage!
@@ -1106,7 +1110,7 @@ function buildMeetingRoom(batch, M, cx, cy, cz, ry, roomD, roomL, colliders) {
 
   // Glowing blue Kazakhstan Map on the far solid NE end wall (local +Z, facing -Z toward camera!)
   const endZ = roomL / 2 - 0.16;
-  const glowBack = new THREE.MeshStandardMaterial({
+  const glowBack = cachedMaterial({
     color: 0x00aaff, emissive: 0x0088ff, emissiveIntensity: 1.5, roughness: 0.3,
   });
   batch.box(glowBack, 3.55, 1.92, 0.04, 0, 1.94, endZ + 0.04);
@@ -1137,7 +1141,7 @@ function buildMeetingRoom(batch, M, cx, cy, cz, ry, roomD, roomL, colliders) {
   batch.box(mat(M, 'walnutDoor', 'wood'), cabW, cabH, 0.05, cabX, cabH / 2, cabZ + cabD / 2 - 0.025);
   // Light cream interior backing behind trophies so gold cups pop
   batch.box(mat(M, 'plasterWall', 'stone'), 0.02, cabH - 0.14, cabD - 0.12, cabX + cabW / 2 - 0.06, cabH / 2, cabZ);
-  const goldMat = new THREE.MeshStandardMaterial({ color: 0xf6c945, metalness: 0.9, roughness: 0.16, emissive: 0x3a2600, emissiveIntensity: 0.25 });
+  const goldMat = cachedMaterial({ color: 0xf6c945, metalness: 0.9, roughness: 0.16, emissive: 0x3a2600, emissiveIntensity: 0.25 });
   for (let sh = 0; sh < 4; sh++) {
     const sy = 0.42 + sh * 0.42;
     batch.box(mat(M, 'woodLight', 'wood'), cabW - 0.06, 0.03, cabD - 0.1, cabX - 0.01, sy, cabZ);
@@ -1171,7 +1175,7 @@ function buildDirectorOffice(batch, M, cx, cy, cz, ry, w, d) {
 
   // Reception area (first part)
   // Secretary desk
-  batch.box(mat(M, 'wood'), 1.4, 0.74, 0.6, -w / 2 + 1.5, 0.37, d / 2 - 1.0);
+  batch.box(mat(M, 'woodLight', 'wood'), 1.4, 0.74, 0.6, -w / 2 + 1.5, 0.37, d / 2 - 1.0);
   batch.box(mat(M, 'officeScreen', 'lampGlow'), 0.44, 0.26, 0.01, -w / 2 + 1.5, 0.98, d / 2 - 1.2);
   officeChair(batch, M, -w / 2 + 1.5, 0, d / 2 - 0.3, Math.PI);
   // Waiting sofa
@@ -1191,7 +1195,7 @@ function buildDirectorOffice(batch, M, cx, cy, cz, ry, w, d) {
   batch.cyl(mat(M, 'chrome', 'metalDark'), 0.05, 0.06, 0.42, 8, w / 4, 0.22, -d / 4 + 1.0);
 
   // Briefing table for 6
-  batch.box(mat(M, 'wood'), 1.6, 0.06, 0.8, w / 4, 0.74, d / 4 - 0.5);
+  batch.box(mat(M, 'woodLight', 'wood'), 1.6, 0.06, 0.8, w / 4, 0.74, d / 4 - 0.5);
   for (let i = 0; i < 3; i++) {
     for (const s of [-1, 1]) {
       conferenceChair(batch, M, w / 4 - 0.5 + i * 0.5, 0, d / 4 - 0.5 + s * 0.7, s > 0 ? 0 : Math.PI);
@@ -1428,77 +1432,64 @@ export function buildInteriors(scene, M, colliders) {
 
   batch.build(group, { cast: true, receive: true, name: 'interior' });
 
-  // Bright, crisp, balanced office interior PointLights (distance: 32, decay: 1.3)
+  // Strategic key PointLights (12 total instead of 26) paired with bright emissive fixtures
   const interiorLights = [];
-  const addLight = (x, y, z, color = 0xfffaf2, weight = 0.34) => {
-    const l = new THREE.PointLight(color, 12 * weight, 32, 1.3);
+  const addLight = (x, y, z, color = 0xfffaf2, weight = 0.42, dist = 20) => {
+    const l = new THREE.PointLight(color, 12 * weight, dist, 1.35);
     l.userData.weight = weight;
+    l.userData.dist = dist;
     l.position.set(x, PODIUM + y, z);
     scene.add(l);
     interiorLights.push(l);
   };
 
   // Entrance lobby (guard post, ICA banner, turnstiles, waiting area)
-  addLight(-3.2, 2.95, 9.6, 0xfffdf8, 0.30);
-  addLight(2.8, 2.95, 9.6, 0xfffdf8, 0.28);
+  addLight(0, 2.95, 9.6, 0xfffdf8, 0.44, 20);
 
-  // Rotunda hall 1st, 2nd, 3rd floors (outside elevator shaft)
-  for (let lv = 0; lv < 3; lv++) {
-    const fy = FLOOR[lv] + 2.95;
-    addLight(0, fy, 4.4, 0xfffaf0, 0.28);
-    addLight(0, fy, -4.4, 0xfffaf0, 0.28);
-  }
+  // Rotunda hall across 1st, 2nd, 3rd floors (staggered around central elevator shaft)
+  addLight(0, FLOOR[0] + 2.95, 3.8, 0xfffaf0, 0.42, 20);
+  addLight(0, FLOOR[1] + 2.95, -3.8, 0xfffaf0, 0.42, 20);
+  addLight(0, FLOOR[2] + 2.95, 3.8, 0xfffaf0, 0.40, 20);
 
-  // Floor 1 — Dispatch Center (x = -33.2..-21.5, z = -7.2..-1.9) + Block corridor
-  addLight(-29.5, 2.9, -4.55, 0xf2f8ff, 0.24);
-  addLight(-24.8, 2.9, -4.55, 0xf8fbff, 0.26);
-  addLight(-15.5, 2.9, CORR_Z, 0xfffaf0, 0.28);
+  // Floor 1 — Dispatch Center + Block corridor
+  addLight(-27.0, 2.9, -4.55, 0xf2f8ff, 0.38, 18);
+  addLight(-15.5, 2.9, CORR_Z, 0xfffaf0, 0.38, 18);
 
-  // Floor 2 — Assembly Hall (x = -33.2..-9.8, z = -7.2..-1.9)
-  addLight(-29.8, FLOOR[1] + 2.95, -4.55, 0xfffdf6, 0.26);
-  addLight(-22.5, FLOOR[1] + 2.95, -4.55, 0xfffdf6, 0.26);
-  addLight(-15.5, FLOOR[1] + 2.95, -4.55, 0xfffdf6, 0.26);
+  // Floor 2 — Assembly Hall (2 key lights spanning 23m auditorium)
+  addLight(-28.0, FLOOR[1] + 2.95, -4.55, 0xfffdf6, 0.42, 20);
+  addLight(-17.5, FLOOR[1] + 2.95, -4.55, 0xfffdf6, 0.42, 20);
 
   // Floor 3 — Block offices & corridor
-  addLight(-25.5, FLOOR[2] + 2.9, CORR_Z, 0xfffaf0, 0.28);
-  addLight(-15.5, FLOOR[2] + 2.9, CORR_Z, 0xfffaf0, 0.28);
+  addLight(-21.5, FLOOR[2] + 2.9, CORR_Z, 0xfffaf0, 0.40, 22);
 
-  // Wing lights: Meeting Room (Floor 2), Director's Office (Floor 3), corridors
+  // Wing lights: Floor 1 corridor, Meeting Room (Floor 2), Director's Office (Floor 3)
   const wa = W.az, wax = Math.sin(wa), waz = -Math.cos(wa);
   const wnx = Math.cos(wa), wnz = Math.sin(wa);
   const wPt = (s, t) => ({ x: wax * s + wnx * t, z: waz * s + wnz * t });
-  for (const ms of [15.5, 22.0]) {
-    const mp = wPt(ms, 4.1);
-    addLight(mp.x, FLOOR[1] + 2.95, mp.z, 0xfffdf8, 0.26);
-  }
-  for (const ds of [16.0, 22.5]) {
-    const dp = wPt(ds, 4.1);
-    addLight(dp.x, FLOOR[2] + 2.95, dp.z, 0xfffaf2, 0.26);
-  }
-  for (let lv = 0; lv < 3; lv++) {
-    const wp1 = wPt(17.5, -1.5);
-    const wp2 = wPt(28.0, 0);
-    addLight(wp1.x, FLOOR[lv] + 2.9, wp1.z, 0xfffaf0, 0.24);
-    addLight(wp2.x, FLOOR[lv] + 2.9, wp2.z, 0xfffaf0, 0.24);
+  {
+    const wp1 = wPt(20.5, 0);
+    addLight(wp1.x, FLOOR[0] + 2.9, wp1.z, 0xfffaf0, 0.40, 22);
+    const mp = wPt(19.0, 3.2);
+    addLight(mp.x, FLOOR[1] + 2.95, mp.z, 0xfffdf8, 0.42, 20);
+    const dp = wPt(19.5, 3.2);
+    addLight(dp.x, FLOOR[2] + 2.95, dp.z, 0xfffaf2, 0.42, 20);
   }
 
   group.userData.lights = interiorLights;
   scene.add(group);
 
   // Update function for animations (turnstile gates + elevator doors)
-  const elevatorState = { currentLevel: 0, moving: false, targetLevel: -1, cabinY: FLOOR[0], doorOpenTimer: 0 };
-
   group.update = (dt, playerPos) => {
     if (!playerPos) return;
     const localY = playerPos.y - PODIUM;
+    const onFirstFloor = Math.abs(playerPos.y - PODIUM) < 1.5;
 
-    // Animate turnstile gates based on player proximity
+    // Animate 1st-floor turnstile gates based on player proximity (floor-checked!)
     for (const g of gates) {
       const dx = playerPos.x - g.x;
-      const dz = playerPos.z - (PODIUM > 0 ? g.z : g.z);
       const pz = playerPos.z - g.z;
       const dist = Math.hypot(dx, pz);
-      const targetOpen = dist < 2.5 ? 1 : 0;
+      const targetOpen = (onFirstFloor && dist < 2.5) ? 1 : 0;
       g.open += (targetOpen - g.open) * Math.min(1, dt * 5);
       const off = g.open * 0.35;
       g.left.position.x = g.x - 0.2 - off;
@@ -1519,11 +1510,11 @@ export function buildInteriors(scene, M, colliders) {
     }
   };
 
-  // Expose elevator cabin for controls.js to move
+  // Expose elevator cabin for controls.js to move (world Y heights matching colliders)
   group.userData.elevator = {
     cabin: elevator.cabin,
     doorParts: elevator.doorParts,
-    levels: [FLOOR[0], FLOOR[1], FLOOR[2]],
+    levels: [PODIUM + FLOOR[0], PODIUM + FLOOR[1], PODIUM + FLOOR[2]],
   };
 
   return group;

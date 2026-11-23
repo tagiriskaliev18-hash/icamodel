@@ -599,6 +599,10 @@ export function makeMaterials(env) {
     lampGlow: new THREE.MeshStandardMaterial({
       color: 0xfff4de, emissive: 0xffe6bd, emissiveIntensity: 1.1, roughness: 0.4,
     }),
+    parkLampGlobe: new THREE.MeshStandardMaterial({
+      color: 0xfff8ee, emissive: 0xfff0d0, emissiveIntensity: 0.25,
+      roughness: 0.3, transparent: true, opacity: 0.85,
+    }),
     signBlue: new THREE.MeshStandardMaterial({ color: 0x0b4a8c, roughness: 0.5, metalness: 0.1 }),
 
     /* ---- Trees/vegetation ---- */
@@ -698,12 +702,89 @@ export function makeMaterials(env) {
     clearcoat: 1, clearcoatRoughness: 0.03, reflectivity: 1,
   });
 
+  _cachedEnv = env;
   for (const k of Object.keys(M)) {
     if (M[k].isMeshStandardMaterial || M[k].isMeshPhysicalMaterial) {
       M[k].envMap = env; M[k].envMapIntensity = M[k].envMapIntensity ?? 0.55;
     }
   }
   return M;
+}
+
+/* ----------------------------------------------------------- material pool */
+const _matPool = new Map();
+let _cachedEnv = null;
+
+export function cachedMaterial(opts) {
+  const type = opts.type || 'std';
+  const key = [
+    type,
+    opts.color ?? 0xffffff,
+    opts.roughness ?? 0.5,
+    opts.metalness ?? 0,
+    opts.emissive ?? 0,
+    opts.emissiveIntensity ?? 1,
+    opts.transparent ? 1 : 0,
+    opts.opacity ?? 1,
+    opts.side ?? THREE.FrontSide,
+    opts.depthWrite ?? true,
+    opts.envMapIntensity ?? 0.55,
+    opts.clearcoat ?? 0,
+    opts.toneMapped ?? true,
+    opts.map ? opts.map.uuid : '',
+    opts.bumpMap ? opts.bumpMap.uuid : '',
+    opts.bumpScale ?? 1,
+  ].join('|');
+  if (_matPool.has(key)) return _matPool.get(key);
+  const { type: _t, ...rest } = opts;
+  const m = type === 'physical'
+    ? new THREE.MeshPhysicalMaterial(rest)
+    : type === 'basic'
+      ? new THREE.MeshBasicMaterial(rest)
+      : new THREE.MeshStandardMaterial(rest);
+  if ((m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) && _cachedEnv) {
+    m.envMap = _cachedEnv;
+    m.envMapIntensity = m.envMapIntensity ?? 0.55;
+  }
+  _matPool.set(key, m);
+  return m;
+}
+
+export function updateCachedMaterialsEnv(envTex) {
+  _cachedEnv = envTex;
+  for (const m of _matPool.values()) {
+    if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) {
+      m.envMap = envTex;
+    }
+  }
+}
+
+/* Build annular rotunda floor/ceiling ring, cutting the 20°..160° and 200°..340°
+   grand staircase wells (r = 4.55..6.65) when cutStairwell is true. */
+export function addRotundaRing(batch, mat, rIn, rOut, y, faceDown = false, cutStairwell = false) {
+  const rx = faceDown ? Math.PI / 2 : -Math.PI / 2;
+  const addArc = (ri, ro, seg, thetaStart, thetaLength) => {
+    const g = new THREE.RingGeometry(ri, ro, seg, 1, thetaStart, thetaLength);
+    g.rotateX(rx);
+    batch.add(g, mat, new THREE.Matrix4().makeTranslation(0, y, 0));
+  };
+  if (!cutStairwell) {
+    addArc(rIn, rOut, 72, 0, Math.PI * 2);
+    return;
+  }
+  const rStairIn = 4.55;
+  const rStairOut = 6.65;
+  if (rIn < rStairIn) addArc(rIn, Math.min(rOut, rStairIn), 64, 0, Math.PI * 2);
+  if (rOut > rStairOut) addArc(Math.max(rIn, rStairOut), rOut, 64, 0, Math.PI * 2);
+  const bandIn = Math.max(rIn, rStairIn);
+  const bandOut = Math.min(rOut, rStairOut);
+  if (bandOut > bandIn) {
+    // North landing (az 340°..20°) & South landing (az 160°..200°)
+    const northStart = faceDown ? 250 * DEG : 70 * DEG;
+    const southStart = faceDown ? 70 * DEG : 250 * DEG;
+    addArc(bandIn, bandOut, 16, northStart, 40 * DEG);
+    addArc(bandIn, bandOut, 16, southStart, 40 * DEG);
+  }
 }
 
 /* ---------------------------------------------------------------- batching */

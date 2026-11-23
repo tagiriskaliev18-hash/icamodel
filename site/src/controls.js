@@ -7,7 +7,7 @@
    Exports VIEWPOINTS, createController. */
 
 import * as THREE from 'three';
-import { clamp, easeInOut, PODIUM, LAYOUT, FLOOR } from './core.js';
+import { clamp, easeInOut, PODIUM, LAYOUT } from './core.js';
 
 const _wingPt = (s, t, y) => {
   const a = LAYOUT.wing.az;
@@ -121,6 +121,9 @@ export function createController(camera, domElement, colliders, character, opts 
     dragging: false,
     lastX: 0,
     lastY: 0,
+    lastDownX: 0,
+    lastDownY: 0,
+    downType: 'mouse',
     touchId: null,
     keys: new Set(),
     mobileMove: { x: 0, y: 0 },
@@ -134,6 +137,7 @@ export function createController(camera, domElement, colliders, character, opts 
     elevatorDoors: null,
     elevatorLevels: null,
     elevatorHudVisible: false,
+    elevatorHudTimer: null,
   };
 
   const _tmpPos = new THREE.Vector3();
@@ -162,7 +166,7 @@ export function createController(camera, domElement, colliders, character, opts 
         const dirX = Math.sin(c.az), dirZ = -Math.cos(c.az);
         const sideX = -dirZ, sideZ = dirX;
         const rAlong = x * dirX + z * dirZ;
-        const rSide = Math.abs(x * sideX + z * sideZ);
+        const rSide = Math.abs((x * sideX + z * sideZ) - (c.sideOffset || 0));
         if (rSide <= c.width * 0.52 && rAlong >= c.r0 - 0.5 && rAlong <= c.r1 + 0.5) {
           const t = clamp((c.r1 - rAlong) / (c.r1 - c.r0), 0, 1);
           const rampY = c.y0 + t * (c.y1 - c.y0);
@@ -216,9 +220,7 @@ export function createController(camera, domElement, colliders, character, opts 
               progress = off / span;
             }
             progress = clamp(progress, 0, 1);
-            const stepH = (c.y1 - c.y0) / c.steps;
-            const stepIdx = Math.floor(progress * c.steps);
-            const stairY = c.y0 + (stepIdx + 1) * stepH;
+            const stairY = c.y0 + progress * (c.y1 - c.y0);
             if (stairY <= curY + 0.85 && curY >= c.y0 - 0.5 && curY <= c.y1 + 0.5) {
               h = Math.max(h, stairY);
             }
@@ -227,34 +229,46 @@ export function createController(camera, domElement, colliders, character, opts 
       }
     }
 
-    // Upper floor rings inside the rotunda hall
+    // Upper floor rings inside the rotunda hall (exclude grand staircase cutouts 20°..160°, 200°..340°)
     const rCenter = Math.hypot(x, z);
-    if (rCenter >= 3.65 && rCenter <= LAYOUT.rotunda.hall) {
+    let rotAng = Math.atan2(x, -z) * 180 / Math.PI;
+    if (rotAng < 0) rotAng += 360;
+    const inStairWell = rCenter >= 4.55 && rCenter <= 6.65 &&
+      ((rotAng >= 20 && rotAng <= 160) || (rotAng >= 200 && rotAng <= 340));
+    if (rCenter >= LAYOUT.rotunda.core && rCenter <= LAYOUT.rotunda.hall && !inStairWell) {
       for (const lv of [3.6, 7.2]) {
         const fy = PODIUM + lv;
         if (curY >= fy - 0.55) h = Math.max(h, fy);
       }
     }
 
-    // Block wing floors (accessible via open portals)
+    // Block wing floors (only active levels 0, 1, 2 — exclude non-existent FLOOR[3])
     const B = LAYOUT.block;
     if (x >= B.x0 && x <= B.x1 && z >= B.z0 && z <= B.z1) {
-      for (const lv of FLOOR) {
+      for (const lv of [0, 3.6, 7.2]) {
         const fy = PODIUM + lv;
-        if (lv > 0 && curY >= fy - 0.55) h = Math.max(h, fy);
+        if (curY >= fy - 0.55) h = Math.max(h, fy);
       }
     }
 
-    // Wing floors
+    // Block-to-rotunda corridor threshold bridge (closes x = -9.4..-8.55 gap)
+    if (x >= -9.5 && x <= -8.1 && z >= -2.3 && z <= 1.3) {
+      for (const lv of [0, 3.6, 7.2]) {
+        const fy = PODIUM + lv;
+        if (curY >= fy - 0.55) h = Math.max(h, fy);
+      }
+    }
+
+    // Wing floors (only active levels 0, 1, 2 — exclude non-existent FLOOR[3])
     const W = LAYOUT.wing;
     const wa = W.az, wax = Math.sin(wa), waz = -Math.cos(wa);
     const wnx = Math.cos(wa), wnz = Math.sin(wa);
     const ws = x * wax + z * waz; // along axis
     const wt = Math.abs(x * wnx + z * wnz); // across axis
     if (ws >= W.s0 && ws <= W.s1 && wt <= W.half) {
-      for (const lv of FLOOR) {
+      for (const lv of [0, 3.6, 7.2]) {
         const fy = PODIUM + lv;
-        if (lv > 0 && curY >= fy - 0.55) h = Math.max(h, fy);
+        if (curY >= fy - 0.55) h = Math.max(h, fy);
       }
     }
 
@@ -304,6 +318,35 @@ export function createController(camera, domElement, colliders, character, opts 
               else pz = c.z1 + BODY_RADIUS;
             }
           }
+        } else if (c.type === 'obb') {
+          if (headY < c.y0 || feetY > c.y1) continue;
+          const dx = px - c.cx, dz = pz - c.cz;
+          const nx = -c.uz, nz = c.ux;
+          const lu = dx * c.ux + dz * c.uz;
+          const lv = dx * nx + dz * nz;
+          const cu = clamp(lu, -c.halfW, c.halfW);
+          const cv = clamp(lv, -c.halfD, c.halfD);
+          const du = lu - cu, dv = lv - cv;
+          const d = Math.hypot(du, dv);
+          if (d < BODY_RADIUS) {
+            if (d > 1e-5) {
+              const push = (BODY_RADIUS - d) / d;
+              const pu = du * push, pv = dv * push;
+              px += c.ux * pu + nx * pv;
+              pz += c.uz * pu + nz * pv;
+            } else {
+              const dl = Math.abs(lu + c.halfW), dr = Math.abs(c.halfW - lu);
+              const dt2 = Math.abs(lv + c.halfD), db = Math.abs(c.halfD - lv);
+              const m = Math.min(dl, dr, dt2, db);
+              let pu = 0, pv = 0;
+              if (m === dl) pu = -(c.halfW + BODY_RADIUS) - lu;
+              else if (m === dr) pu = (c.halfW + BODY_RADIUS) - lu;
+              else if (m === dt2) pv = -(c.halfD + BODY_RADIUS) - lv;
+              else pv = (c.halfD + BODY_RADIUS) - lv;
+              px += c.ux * pu + nx * pv;
+              pz += c.uz * pu + nz * pv;
+            }
+          }
         } else if (c.type === 'poly') {
           if (headY < c.y0 || feetY > c.y1) continue;
           if (pointInPoly(px, pz, c.pts)) {
@@ -317,7 +360,8 @@ export function createController(camera, domElement, colliders, character, opts 
               const d = Math.hypot(px - cx2, pz - cz2);
               if (d < bestDist) {
                 bestDist = d;
-                const nx = -(vz) / Math.sqrt(l2), nz2 = vx / Math.sqrt(l2);
+                const nx = d > 1e-5 ? (cx2 - px) / d : -(vz) / Math.sqrt(l2);
+                const nz2 = d > 1e-5 ? (cz2 - pz) / d : vx / Math.sqrt(l2);
                 bestX = cx2 + nx * BODY_RADIUS;
                 bestZ = cz2 + nz2 * BODY_RADIUS;
               }
@@ -416,7 +460,11 @@ export function createController(camera, domElement, colliders, character, opts 
     }
     hud.textContent = `🔼 Этаж ${floorNum}`;
     hud.style.opacity = '1';
-    setTimeout(() => { if (hud) hud.style.opacity = '0'; }, 2000);
+    if (state.elevatorHudTimer) clearTimeout(state.elevatorHudTimer);
+    state.elevatorHudTimer = setTimeout(() => {
+      if (hud) hud.style.opacity = '0';
+      state.elevatorHudTimer = null;
+    }, 2000);
   }
 
   function updateElevator(dt) {
@@ -426,12 +474,14 @@ export function createController(camera, domElement, colliders, character, opts 
     if (state.elevatorAnimT >= 1) {
       state.elevatorAnimT = 1;
       state.elevatorRiding = false;
+      state.vy = 0;
+      state.grounded = true;
     }
     const t = easeInOut(clamp(state.elevatorAnimT, 0, 1));
     const newY = state.elevatorFromY + (state.elevatorToY - state.elevatorFromY) * t;
     state.feet.y = newY;
 
-    // Move cabin mesh if available
+    // Move cabin mesh if available (local Y relative to PODIUM)
     if (state.elevatorCabin) {
       state.elevatorCabin.position.y = newY - PODIUM;
     }
@@ -598,7 +648,25 @@ export function createController(camera, domElement, colliders, character, opts 
     state.dragging = true;
     state.lastX = e.clientX;
     state.lastY = e.clientY;
+    state.lastDownX = e.clientX;
+    state.lastDownY = e.clientY;
+    state.downType = e.pointerType || 'mouse';
     if (e.pointerType === 'touch') state.touchId = e.pointerId;
+  }
+
+  function onCanvasClick(e) {
+    if (state.mode !== 'human' || state.pointerLocked) return;
+    if (state.downType === 'touch') return;
+    if (Math.hypot(e.clientX - state.lastDownX, e.clientY - state.lastDownY) > 6) return;
+    requestPointerLockSafe();
+  }
+
+  function requestPointerLockSafe() {
+    if (!domElement.requestPointerLock) return;
+    try {
+      const res = domElement.requestPointerLock();
+      if (res && typeof res.catch === 'function') res.catch(() => {});
+    } catch { /* ignore */ }
   }
 
   function onPointerMove(e) {
@@ -645,6 +713,7 @@ export function createController(camera, domElement, colliders, character, opts 
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   domElement.addEventListener('pointerdown', onPointerDown);
+  domElement.addEventListener('click', onCanvasClick);
   window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('pointerup', onPointerUp);
   domElement.addEventListener('wheel', onWheel, { passive: true });
@@ -767,6 +836,13 @@ export function createController(camera, domElement, colliders, character, opts 
     }
   }
 
+  function jump() {
+    if (state.mode === 'human' && state.grounded && !state.elevatorRiding) {
+      state.vy = JUMP_V;
+      state.grounded = false;
+    }
+  }
+
   return {
     update,
     setMode,
@@ -775,11 +851,11 @@ export function createController(camera, domElement, colliders, character, opts 
     lookAt,
     setHumanPose,
     setMobileMove,
+    jump,
+    useElevator: tryUseElevator,
     getState,
     getPlayerPos,
     setElevatorRef,
-    requestPointerLock() {
-      if (domElement.requestPointerLock) domElement.requestPointerLock();
-    },
+    requestPointerLock: requestPointerLockSafe,
   };
 }

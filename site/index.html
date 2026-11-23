@@ -172,6 +172,27 @@
       pointer-events: none;
     }
 
+    /* Mobile action buttons (Jump + Elevator, shown only in Human mode on mobile) */
+    #mobile-actions {
+      display: none; pointer-events: auto;
+      position: fixed; right: 16px; bottom: 112px; z-index: 15;
+      flex-direction: column; gap: 8px;
+    }
+    #mobile-actions.visible { display: flex; }
+    .mobile-act-btn {
+      appearance: none; border: 1px solid var(--border-hi);
+      background: rgba(10, 12, 20, 0.62); color: var(--text);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      font-family: inherit; font-size: 12px; font-weight: 600;
+      padding: 10px 14px; border-radius: 12px; cursor: pointer;
+      min-width: 78px; text-align: center;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+    }
+    .mobile-act-btn:active {
+      background: var(--accent-soft);
+      border-color: rgba(0, 245, 255, 0.6);
+    }
+
     /* Mobile 390x844 layout */
     @media (max-width: 640px) {
       .hud { padding: 12px 12px 14px; }
@@ -193,7 +214,8 @@
       }
       .views::-webkit-scrollbar { display: none; }
       .dock-btn { padding: 6px 8px; font-size: 11px; }
-      .help-card { display: none; }
+      .help-card { font-size: 10.5px; padding: 5px 10px; text-align: center; }
+      .help-card.hidden { display: none; }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -257,6 +279,10 @@
 
   <div id="mobile-pad" aria-label="Джойстик движения">
     <div class="pad-knob"></div>
+  </div>
+  <div id="mobile-actions" aria-label="Действия">
+    <button type="button" id="btn-mobile-elevator" class="mobile-act-btn">Лифт · E</button>
+    <button type="button" id="btn-mobile-jump" class="mobile-act-btn">Прыжок</button>
   </div>
 
   <script type="module" src="./src/main.js"></script>

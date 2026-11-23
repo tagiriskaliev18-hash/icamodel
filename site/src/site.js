@@ -7,7 +7,7 @@
    Rewritten to match REAL photos of UMG Uralsk territory. */
 
 import * as THREE from 'three';
-import { Batch, DEG, LAYOUT, TEX, mulberry32, polar, fbm, clamp, smoothstep } from './core.js';
+import { Batch, DEG, LAYOUT, TEX, mulberry32, polar, fbm, clamp, smoothstep, cachedMaterial } from './core.js';
 
 const S = LAYOUT.site;
 
@@ -271,7 +271,7 @@ function trees(scene, M) {
   }
 
   /* ---- Flower beds with bright red roses ---- */
-  const bedMat = new THREE.MeshStandardMaterial({ color: 0x8a6b58, roughness: 1 });
+  const bedMat = cachedMaterial({ color: 0x8a6b58, roughness: 1 });
   const beds = [
     { x: -16, z: 40.5, w: 8, d: 3 }, { x: -5, z: 40.5, w: 8, d: 3 },
     { x: 6, z: 40.5, w: 8, d: 3 }, { x: 17, z: 40.5, w: 8, d: 3 },
@@ -290,10 +290,10 @@ function trees(scene, M) {
   }
 
   /* ---- Wooden benches on cast-iron legs ---- */
-  const benchWoodMat = new THREE.MeshStandardMaterial({
+  const benchWoodMat = cachedMaterial({
     color: 0x8a6a44, roughness: 0.7, map: TEX.wood().map, bumpMap: TEX.wood().bump, bumpScale: 0.2,
   });
-  const castIronMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.75, metalness: 0.6 });
+  const castIronMat = cachedMaterial({ color: 0x1a1a1e, roughness: 0.75, metalness: 0.6 });
   const benchPositions = [
     [-20, 38, 0], [-8, 38, 0], [4, 38, 0], [16, 38, 0],
     [-26, 28, Math.PI / 2], [26, 28, -Math.PI / 2],
@@ -343,10 +343,11 @@ function lamps(scene, M, nightLights) {
   for (let i = 0; i < 5; i++) { pts.push([-24 + i * 12, 44]); pts.push([-24 + i * 12, 34]); }
   pts.push([-34, 12], [34, 12], [-40, -20], [40, -20], [-40, -50], [40, -50]);
 
-  const globeMat = new THREE.MeshStandardMaterial({
-    color: 0xfff8ee, emissive: 0xfff0d0, emissiveIntensity: 0.8,
+  const globeMat = M.parkLampGlobe || cachedMaterial({
+    color: 0xfff8ee, emissive: 0xfff0d0, emissiveIntensity: 0.25,
     roughness: 0.3, transparent: true, opacity: 0.85,
   });
+  if (!M.parkLampGlobe) M.parkLampGlobe = globeMat;
 
   const batch = new Batch();
   for (const [x, z] of pts) {
@@ -380,15 +381,16 @@ function parking(scene, M) {
   const colors = [0x2b2f36, 0x8f9296, 0xb5b9bd, 0x1e2a38, 0x6b1f22, 0xe8e8e6, 0x1a4060, 0x4a4a4a];
   const rnd = mulberry32(9);
   const group = new THREE.Group();
+  const sub = new Batch();
+  const glass = cachedMaterial({ color: 0x1a2028, metalness: 0.6, roughness: 0.08, envMapIntensity: 1.3 });
+  const tailMat = cachedMaterial({ color: 0xcc2020, emissive: 0x880000, emissiveIntensity: 0.3, roughness: 0.5 });
   for (let i = 0; i < 9; i++) {
     const x = 14.5 + i * 2.9 + 1.45, z = -46 + (rnd() - 0.5) * 0.5;
-    const sub = new Batch();
     const m = new THREE.Matrix4().compose(
       new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0.02 + rnd() * 0.03, 0)), new THREE.Vector3(1, 1, 1));
     sub.setParent(m);
     const col = colors[Math.floor(rnd() * colors.length)];
-    const body = new THREE.MeshStandardMaterial({ color: col, metalness: 0.65, roughness: 0.28, envMapIntensity: 1.3 });
-    const glass = new THREE.MeshStandardMaterial({ color: 0x1a2028, metalness: 0.6, roughness: 0.08, envMapIntensity: 1.3 });
+    const body = cachedMaterial({ color: col, metalness: 0.65, roughness: 0.28, envMapIntensity: 1.3 });
     // Modern sedan silhouette (more detailed)
     sub.box(body, 1.85, 0.52, 4.5, 0, 0.56, 0);       // Lower body
     sub.box(body, 1.82, 0.14, 4.3, 0, 0.88, 0);       // Belt line
@@ -403,12 +405,10 @@ function parking(scene, M) {
     }
     // Headlights / taillights
     for (const [dx, dz] of [[-0.72, 2.24], [0.72, 2.24]]) sub.box(M.lampGlow, 0.36, 0.1, 0.06, dx, 0.72, dz);
-    for (const [dx, dz] of [[-0.72, -2.24], [0.72, -2.24]]) {
-      const tailMat = new THREE.MeshStandardMaterial({ color: 0xcc2020, emissive: 0x880000, emissiveIntensity: 0.3, roughness: 0.5 });
-      sub.box(tailMat, 0.3, 0.08, 0.04, dx, 0.72, dz);
-    }
-    sub.build(group, { cast: true, receive: true, name: 'car' });
+    for (const [dx, dz] of [[-0.72, -2.24], [0.72, -2.24]]) sub.box(tailMat, 0.3, 0.08, 0.04, dx, 0.72, dz);
   }
+  sub.setParent(null);
+  sub.build(group, { cast: true, receive: true, name: 'cars' });
   scene.add(group);
   return group;
 }
@@ -513,7 +513,7 @@ export function buildSite(scene, M, nightLights) {
 
   // Low neighbourhood buildings
   const bg = new Batch();
-  const bgMat = new THREE.MeshStandardMaterial({ color: 0x4b535e, roughness: 0.96, metalness: 0 });
+  const bgMat = cachedMaterial({ color: 0x4b535e, roughness: 0.96, metalness: 0 });
   const rnd = mulberry32(313);
   for (let i = 0; i < 18; i++) {
     const a = rnd() * Math.PI * 2, r = 92 + rnd() * 20;
