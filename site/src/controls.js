@@ -1,11 +1,22 @@
 /* Camera & movement controller:
    - Drone mode: free 6-DOF flight (WASD + Q/E + Shift + mouse drag / pointer-lock)
      + smooth cinematic spline auto-orbit tour + instant camera presets.
-   - Human mode: first-person walking with gravity, stair/ramp climbing, spiral stair
-     support, wall/column collisions, and visible tuxedo body when looking down. */
+   - Human mode: first-person walking with gravity, arcStair (semicircular grand stair)
+     climbing, elevator ride (E key), wall/column collisions, turnstile pass-through,
+     free corridors into both wings and open rooms.
+   Exports VIEWPOINTS, createController. */
 
 import * as THREE from 'three';
-import { clamp, easeInOut, PODIUM, LAYOUT } from './core.js';
+import { clamp, easeInOut, PODIUM, LAYOUT, FLOOR } from './core.js';
+
+const _wingPt = (s, t, y) => {
+  const a = LAYOUT.wing.az;
+  return [
+    Math.sin(a) * s + Math.cos(a) * t,
+    y,
+    -Math.cos(a) * s + Math.sin(a) * t,
+  ];
+};
 
 export const VIEWPOINTS = {
   facade: {
@@ -18,20 +29,30 @@ export const VIEWPOINTS = {
     pos: [-48, 42, 62],
     target: [0, 6, -4],
   },
-  rotunda: {
-    label: 'Ротонда',
-    pos: [12, 16.5, 31],
-    target: [0, 14.5, 0],
-  },
-  stair: {
-    label: 'Вход',
-    pos: [6.5, 4.2, 34],
-    target: [0, 5.2, 6],
-  },
   lobby: {
     label: 'Холл',
-    pos: [0, PODIUM + 2.1, 7.2],
-    target: [0, PODIUM + 2.2, -5.5],
+    pos: [0.9, PODIUM + 1.82, 13.1],
+    target: [-0.9, PODIUM + 1.60, 5.0],
+  },
+  lift: {
+    label: 'Лифт',
+    pos: [5, PODIUM + 5.5, 6],
+    target: [0, PODIUM + 4.5, 0],
+  },
+  hall: {
+    label: 'Актовый зал',
+    pos: [-16.6, PODIUM + 3.6 + 1.95, -4.35],
+    target: [-32.8, PODIUM + 3.6 + 1.55, -4.55],
+  },
+  meeting: {
+    label: 'Переговорная',
+    pos: _wingPt(12.2, 4.35, PODIUM + 3.6 + 1.92),
+    target: _wingPt(26.0, 4.05, PODIUM + 3.6 + 1.52),
+  },
+  dispatch: {
+    label: 'Диспетчерская',
+    pos: [-23.4, PODIUM + 2.15, -4.55],
+    target: [-32.8, PODIUM + 1.55, -4.55],
   },
 };
 
@@ -84,19 +105,17 @@ export function createController(camera, domElement, colliders, character, opts 
   const tgtCurve = new THREE.CatmullRomCurve3(TOUR_KEYS.map((k) => k.target), true, 'catmullrom', 0.5);
 
   const state = {
-    mode: 'drone',          // 'drone' | 'human'
+    mode: 'drone',
     tour: !reducedMotion,
     tourT: 0,
     yaw: 0,
     pitch: -0.1,
     vel: new THREE.Vector3(),
-    // human body feet position
     feet: new THREE.Vector3(0, 0, 27.5),
     vy: 0,
     grounded: true,
     spiralAngle: 0,
     onSpiral: false,
-    // camera transition
     trans: null,
     pointerLocked: false,
     dragging: false,
@@ -105,11 +124,20 @@ export function createController(camera, domElement, colliders, character, opts 
     touchId: null,
     keys: new Set(),
     mobileMove: { x: 0, y: 0 },
+    // elevator
+    elevatorRiding: false,
+    elevatorCurrentLevel: 0,
+    elevatorAnimT: 0,
+    elevatorFromY: 0,
+    elevatorToY: 0,
+    elevatorCabin: null,
+    elevatorDoors: null,
+    elevatorLevels: null,
+    elevatorHudVisible: false,
   };
 
   const _tmpPos = new THREE.Vector3();
   const _tmpTgt = new THREE.Vector3();
-  const _lookMat = new THREE.Matrix4();
   const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 
   function syncAnglesFromLook(from, to) {
@@ -129,7 +157,6 @@ export function createController(camera, domElement, colliders, character, opts 
   function floorHeightAt(x, z, curY) {
     let h = 0;
 
-    // Grand entrance ramp (stairs)
     for (const c of colliders) {
       if (c.type === 'ramp') {
         const dirX = Math.sin(c.az), dirZ = -Math.cos(c.az);
@@ -152,11 +179,9 @@ export function createController(camera, domElement, colliders, character, opts 
       } else if (c.type === 'spiral') {
         const r = Math.hypot(x, z);
         if (r >= c.rMin && r <= c.rMax && curY >= c.y0 - 0.5 && curY <= c.y1 + 0.8) {
-          // Polar angle matches polar(a, r) => x = sin(a)*r, z = -cos(a)*r
           let a = Math.atan2(x, -z);
           if (a < 0) a += Math.PI * 2;
           const totalRad = c.turns * Math.PI * 2;
-          // Choose turn closest to current Y
           const estTurn = Math.round(((curY - c.y0) / (c.y1 - c.y0) * totalRad - a) / (Math.PI * 2));
           const fullA = clamp(a + estTurn * Math.PI * 2, 0, totalRad);
           const sy = c.y0 + (fullA / totalRad) * (c.y1 - c.y0);
@@ -164,10 +189,45 @@ export function createController(camera, domElement, colliders, character, opts 
             h = Math.max(h, sy);
           }
         }
+      } else if (c.type === 'arcStair') {
+        // Semicircular grand stair: test if player is within the arc sector
+        const r = Math.hypot(x - c.cx, z - c.cz);
+        if (r >= c.rInner && r <= c.rOuter) {
+          let angle = Math.atan2(x - c.cx, -(z - c.cz));
+          if (angle < 0) angle += Math.PI * 2;
+          // Normalize a0, a1 to [0, 2pi]
+          let a0 = ((c.a0 % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+          let a1 = ((c.a1 % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+          // Check if angle is within the arc
+          let inArc = false;
+          if (a0 < a1) {
+            inArc = angle >= a0 && angle <= a1;
+          } else {
+            inArc = angle >= a0 || angle <= a1;
+          }
+          if (inArc) {
+            // Calculate progress along the arc
+            let progress;
+            if (a0 < a1) {
+              progress = (angle - a0) / (a1 - a0);
+            } else {
+              const span = (Math.PI * 2 - a0) + a1;
+              const off = angle >= a0 ? (angle - a0) : (Math.PI * 2 - a0 + angle);
+              progress = off / span;
+            }
+            progress = clamp(progress, 0, 1);
+            const stepH = (c.y1 - c.y0) / c.steps;
+            const stepIdx = Math.floor(progress * c.steps);
+            const stairY = c.y0 + (stepIdx + 1) * stepH;
+            if (stairY <= curY + 0.85 && curY >= c.y0 - 0.5 && curY <= c.y1 + 0.5) {
+              h = Math.max(h, stairY);
+            }
+          }
+        }
       }
     }
 
-    // Upper floor rings inside the rotunda hall (r = 3.7 .. 8.55)
+    // Upper floor rings inside the rotunda hall
     const rCenter = Math.hypot(x, z);
     if (rCenter >= 3.65 && rCenter <= LAYOUT.rotunda.hall) {
       for (const lv of [3.6, 7.2]) {
@@ -175,6 +235,29 @@ export function createController(camera, domElement, colliders, character, opts 
         if (curY >= fy - 0.55) h = Math.max(h, fy);
       }
     }
+
+    // Block wing floors (accessible via open portals)
+    const B = LAYOUT.block;
+    if (x >= B.x0 && x <= B.x1 && z >= B.z0 && z <= B.z1) {
+      for (const lv of FLOOR) {
+        const fy = PODIUM + lv;
+        if (lv > 0 && curY >= fy - 0.55) h = Math.max(h, fy);
+      }
+    }
+
+    // Wing floors
+    const W = LAYOUT.wing;
+    const wa = W.az, wax = Math.sin(wa), waz = -Math.cos(wa);
+    const wnx = Math.cos(wa), wnz = Math.sin(wa);
+    const ws = x * wax + z * waz; // along axis
+    const wt = Math.abs(x * wnx + z * wnz); // across axis
+    if (ws >= W.s0 && ws <= W.s1 && wt <= W.half) {
+      for (const lv of FLOOR) {
+        const fy = PODIUM + lv;
+        if (lv > 0 && curY >= fy - 0.55) h = Math.max(h, fy);
+      }
+    }
+
     return h;
   }
 
@@ -182,12 +265,14 @@ export function createController(camera, domElement, colliders, character, opts 
     let px = pos.x, pz = pos.z;
     const headY = feetY + EYE_H;
 
-    // Keep within site fence bounds
     px = clamp(px, -55, 67);
     pz = clamp(pz, -71, 58);
 
     for (let iter = 0; iter < 2; iter++) {
       for (const c of colliders) {
+        // Skip elevator shaft collider when riding
+        if (c.type === 'elevator') continue;
+
         if (c.type === 'circle') {
           if (headY < c.y0 || feetY > c.y1) continue;
           const dx = px - c.x, dz = pz - c.z;
@@ -210,7 +295,6 @@ export function createController(camera, domElement, colliders, character, opts 
               px += dx * push;
               pz += dz * push;
             } else {
-              // inside rect: push out to nearest edge
               const dl = Math.abs(px - c.x0), dr = Math.abs(c.x1 - px);
               const dt = Math.abs(pz - c.z0), db = Math.abs(c.z1 - pz);
               const m = Math.min(dl, dr, dt, db);
@@ -223,20 +307,19 @@ export function createController(camera, domElement, colliders, character, opts 
         } else if (c.type === 'poly') {
           if (headY < c.y0 || feetY > c.y1) continue;
           if (pointInPoly(px, pz, c.pts)) {
-            // push out from nearest edge
             let bestDist = Infinity, bestX = px, bestZ = pz;
             for (let i = 0; i < c.pts.length; i++) {
               const a = c.pts[i], b = c.pts[(i + 1) % c.pts.length];
               const vx = b[0] - a[0], vz = b[1] - a[1];
               const l2 = vx * vx + vz * vz;
               const t = clamp(((px - a[0]) * vx + (pz - a[1]) * vz) / l2, 0, 1);
-              const cx = a[0] + vx * t, cz = a[1] + vz * t;
-              const d = Math.hypot(px - cx, pz - cz);
+              const cx2 = a[0] + vx * t, cz2 = a[1] + vz * t;
+              const d = Math.hypot(px - cx2, pz - cz2);
               if (d < bestDist) {
                 bestDist = d;
-                const nx = -(vz) / Math.sqrt(l2), nz = vx / Math.sqrt(l2);
-                bestX = cx + nx * BODY_RADIUS;
-                bestZ = cz + nz * BODY_RADIUS;
+                const nx = -(vz) / Math.sqrt(l2), nz2 = vx / Math.sqrt(l2);
+                bestX = cx2 + nx * BODY_RADIUS;
+                bestZ = cz2 + nz2 * BODY_RADIUS;
               }
             }
             px = bestX; pz = bestZ;
@@ -259,9 +342,6 @@ export function createController(camera, domElement, colliders, character, opts 
     const isHuman = state.mode === 'human';
     character.root.visible = isHuman;
     if (!isHuman) return;
-
-    // Position body slightly behind eye line so looking down along the chest plane
-    // cleanly reveals bow tie, white shirt, satin lapels, trousers and walking shoes.
     const fwdX = -Math.sin(state.yaw);
     const fwdZ = -Math.cos(state.yaw);
     const backOffset = 0.16;
@@ -270,9 +350,91 @@ export function createController(camera, domElement, colliders, character, opts 
       state.feet.y,
       state.feet.z - fwdZ * backOffset
     );
-    // Character front is +Z, camera forward is -Z => rotate by yaw + PI
     character.root.rotation.y = state.yaw + Math.PI;
     character.update(dt, horizSpeed, airborne);
+  }
+
+  // Find elevator data from colliders/scene
+  function findElevatorData() {
+    if (state.elevatorCabin) return;
+    for (const c of colliders) {
+      if (c.type === 'elevator') {
+        state.elevatorLevels = c.levels;
+        break;
+      }
+    }
+  }
+
+  function setElevatorRef(cabin, doorParts, levels) {
+    state.elevatorCabin = cabin;
+    state.elevatorDoors = doorParts;
+    state.elevatorLevels = levels;
+  }
+
+  function tryUseElevator() {
+    if (state.mode !== 'human' || state.elevatorRiding) return;
+    findElevatorData();
+    if (!state.elevatorLevels) return;
+
+    // Check if player is near any elevator door
+    const ex = 0, ez = LAYOUT.rotunda.core + 0.6;
+    const dist = Math.hypot(state.feet.x - ex, state.feet.z - ez);
+    if (dist > 2.5) return;
+
+    // Find current level
+    let closestLevel = 0;
+    let closestDist = Infinity;
+    for (let i = 0; i < state.elevatorLevels.length; i++) {
+      const d = Math.abs(state.feet.y - state.elevatorLevels[i]);
+      if (d < closestDist) { closestDist = d; closestLevel = i; }
+    }
+    if (closestDist > 1.5) return;
+
+    // Cycle to next level
+    const nextLevel = (closestLevel + 1) % state.elevatorLevels.length;
+    state.elevatorRiding = true;
+    state.elevatorCurrentLevel = closestLevel;
+    state.elevatorFromY = state.elevatorLevels[closestLevel];
+    state.elevatorToY = state.elevatorLevels[nextLevel];
+    state.elevatorAnimT = 0;
+    state.elevatorHudVisible = true;
+
+    // Show elevator HUD indicator
+    showElevatorHUD(nextLevel + 1);
+  }
+
+  function showElevatorHUD(floorNum) {
+    let hud = document.getElementById('elevator-hud');
+    if (!hud) {
+      hud = document.createElement('div');
+      hud.id = 'elevator-hud';
+      hud.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+        'background:rgba(0,0,0,0.8);color:#00ff88;padding:20px 40px;border-radius:8px;' +
+        'font:600 24px "Segoe UI",sans-serif;z-index:1000;pointer-events:none;' +
+        'transition:opacity 0.3s;border:1px solid #00ff88;';
+      document.body.appendChild(hud);
+    }
+    hud.textContent = `🔼 Этаж ${floorNum}`;
+    hud.style.opacity = '1';
+    setTimeout(() => { if (hud) hud.style.opacity = '0'; }, 2000);
+  }
+
+  function updateElevator(dt) {
+    if (!state.elevatorRiding) return;
+    const dur = 2.0; // seconds to travel between floors
+    state.elevatorAnimT += dt / dur;
+    if (state.elevatorAnimT >= 1) {
+      state.elevatorAnimT = 1;
+      state.elevatorRiding = false;
+    }
+    const t = easeInOut(clamp(state.elevatorAnimT, 0, 1));
+    const newY = state.elevatorFromY + (state.elevatorToY - state.elevatorFromY) * t;
+    state.feet.y = newY;
+
+    // Move cabin mesh if available
+    if (state.elevatorCabin) {
+      state.elevatorCabin.position.y = newY - PODIUM;
+    }
   }
 
   function setMode(mode, spawnOpts) {
@@ -280,6 +442,7 @@ export function createController(camera, domElement, colliders, character, opts 
     state.mode = mode;
     state.trans = null;
     state.vel.set(0, 0, 0);
+    state.elevatorRiding = false;
     camera.fov = mode === 'human' ? 68 : 48;
     camera.updateProjectionMatrix();
     if (mode === 'human') {
@@ -289,14 +452,13 @@ export function createController(camera, domElement, colliders, character, opts 
         if (spawnOpts.yaw !== undefined) state.yaw = spawnOpts.yaw;
         if (spawnOpts.pitch !== undefined) state.pitch = spawnOpts.pitch;
       } else {
-        // If drone is close to ground & inside/near building, drop right there; else front forecourt
         const nearHall = Math.hypot(camera.position.x, camera.position.z) < 8.0 && camera.position.y < PODIUM + 4.5;
         if (nearHall) {
           state.feet.set(camera.position.x, PODIUM, camera.position.z);
           state.pitch = clamp(state.pitch, -1.45, 1.2);
         } else {
           state.feet.set(0, 0, 27.5);
-          state.yaw = 0; // looking north (-Z) toward entrance stairs
+          state.yaw = 0;
           state.pitch = 0.04;
         }
       }
@@ -312,7 +474,6 @@ export function createController(camera, domElement, colliders, character, opts 
       if (document.pointerLockElement === domElement) {
         try { document.exitPointerLock(); } catch { /* ignore */ }
       }
-      // Lift drone slightly above human head so transition feels airy
       if (camera.position.y < 3.0) camera.position.y = 4.5;
     }
     onStateChange(getState());
@@ -340,7 +501,6 @@ export function createController(camera, domElement, colliders, character, opts 
       applyCameraAngles();
       state.trans = null;
     } else {
-      // Compute current look target 18m ahead
       const curDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
       const fromTgt = camera.position.clone().addScaledVector(curDir, 18);
       state.trans = {
@@ -372,7 +532,6 @@ export function createController(camera, domElement, colliders, character, opts 
     state.grounded = true;
     camera.position.set(x, y + EYE_H, z);
     applyCameraAngles();
-    // Advance walk cycle a bit if speed > 0 so legs show a natural mid-stride pose
     if (speed > 0 && character) {
       for (let i = 0; i < 8; i++) character.update(0.05, speed, false);
     }
@@ -387,11 +546,20 @@ export function createController(camera, domElement, colliders, character, opts 
     };
   }
 
+  function getPlayerPos() {
+    return state.feet.clone();
+  }
+
   /* --------------------------------------------------------------- events */
   function onKeyDown(e) {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     const code = e.code;
     if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(code)) {
+      if (code === 'KeyE' && state.mode === 'human') {
+        // Try using elevator
+        tryUseElevator();
+        return;
+      }
       state.keys.add(code);
       if (state.tour) {
         state.tour = false;
@@ -406,8 +574,11 @@ export function createController(camera, domElement, colliders, character, opts 
     if (code === 'ShiftLeft' || code === 'ShiftRight') state.keys.add('Shift');
     if (code === 'Digit1') goToViewpoint('facade');
     if (code === 'Digit2') goToViewpoint('aerial');
-    if (code === 'Digit3') goToViewpoint('rotunda');
-    if (code === 'Digit4') goToViewpoint('lobby');
+    if (code === 'Digit3') goToViewpoint('lobby');
+    if (code === 'Digit4') goToViewpoint('lift');
+    if (code === 'Digit5') goToViewpoint('hall');
+    if (code === 'Digit6') goToViewpoint('meeting');
+    if (code === 'Digit7') goToViewpoint('dispatch');
     if (code === 'KeyV') setMode(state.mode === 'drone' ? 'human' : 'drone');
     if (code === 'KeyT') setTour(!state.tour);
   }
@@ -479,7 +650,6 @@ export function createController(camera, domElement, colliders, character, opts 
   domElement.addEventListener('wheel', onWheel, { passive: true });
   document.addEventListener('pointerlockchange', onPointerLockChange);
 
-  // Initialize at hero facade viewpoint
   goToViewpoint('facade', true);
   state.tour = !reducedMotion;
 
@@ -533,6 +703,15 @@ export function createController(camera, domElement, colliders, character, opts 
     }
 
     /* Human mode */
+    // Elevator ride overrides normal movement
+    if (state.elevatorRiding) {
+      updateElevator(dt);
+      camera.position.set(state.feet.x, state.feet.y + EYE_H, state.feet.z);
+      applyCameraAngles();
+      updateCharacterTransform(dt, 0, false);
+      return;
+    }
+
     applyCameraAngles();
     const walkSpeed = state.keys.has('Shift') ? 6.2 : 3.4;
     const fwdX = -Math.sin(state.yaw), fwdZ = -Math.cos(state.yaw);
@@ -564,7 +743,6 @@ export function createController(camera, domElement, colliders, character, opts 
       state.vy = 0;
       state.grounded = true;
     } else if (state.feet.y - floorY < 0.25 && state.vy <= 0) {
-      // smooth step-down on stairs
       state.feet.y = floorY;
       state.vy = 0;
       state.grounded = true;
@@ -573,7 +751,6 @@ export function createController(camera, domElement, colliders, character, opts 
     }
 
     const horizSpeed = Math.hypot(state.vel.x, state.vel.z);
-    // subtle natural head bob while walking
     const bobY = state.grounded && horizSpeed > 0.2
       ? Math.sin(performance.now() * 0.011) * Math.min(0.035, horizSpeed * 0.008)
       : 0;
@@ -599,6 +776,8 @@ export function createController(camera, domElement, colliders, character, opts 
     setHumanPose,
     setMobileMove,
     getState,
+    getPlayerPos,
+    setElevatorRef,
     requestPointerLock() {
       if (domElement.requestPointerLock) domElement.requestPointerLock();
     },

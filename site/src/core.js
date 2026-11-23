@@ -1,5 +1,7 @@
 /* Core: layout constants, deterministic noise, procedural textures, materials,
-   geometry batching and the sky/environment rig. */
+   geometry batching and the sky/environment rig.
+   Provides ALL PBR materials for both exterior (building.js, site.js) and
+   interior (interior.js) through the shared `M` dictionary from makeMaterials(). */
 
 import * as THREE from 'three';
 
@@ -16,12 +18,12 @@ export const ROOF = 14.4;
 export const ATTIC = 16.2;
 
 export const LAYOUT = {
-  rotunda: { r: 10.3, hall: 8.55, core: 1.35, drumTop: 19.2 },
-  block: { x0: -33.6, x1: -9.4, z0: -7.6, z1: 6.6 },
-  wing: { az: 41 * DEG, s0: 4.5, s1: 34.2, half: 7.15 },
-  gallery: { a0: 112, a1: 248, r0: 15.0, r1: 19.4, h: 4.6 },
-  entry: { az: 180, width: 15.5, steps: 8 },
-  site: { x0: -120, x1: 120, z0: -110, z1: 120 },
+  rotunda: { r: 10.3, hall: 8.55, core: 1.85, drumTop: 18.2 },
+  block:   { x0: -33.6, x1: -9.4, z0: -7.6, z1: 6.6 },
+  wing:    { az: 41 * DEG, s0: 4.5, s1: 34.2, half: 7.15 },
+  gallery: { a0: 112, a1: 248, r0: 14.2, r1: 18.6, h: 4.4 },
+  entry:   { az: 180, width: 15.5, steps: 8 },
+  site:    { x0: -120, x1: 120, z0: -110, z1: 120 },
 };
 
 /* --------------------------------------------------------------- utilities */
@@ -107,6 +109,25 @@ function procedural(size, fn, { repeat = 1, srgb = true, aniso = 8 } = {}) {
   return { map, bump };
 }
 
+/* Roughness-only procedural: fn(u,v) -> roughness 0..1 */
+function proceduralRoughness(size, fn, { repeat = 1, aniso = 8 } = {}) {
+  const { c, x } = canvas2d(size);
+  const img = x.createImageData(size, size);
+  for (let j = 0; j < size; j++) {
+    for (let i = 0; i < size; i++) {
+      const o = (j * size + i) * 4;
+      const r = Math.round(clamp(fn(i / size, j / size, i, j), 0, 1) * 255);
+      img.data[o] = img.data[o + 1] = img.data[o + 2] = r; img.data[o + 3] = 255;
+    }
+  }
+  x.putImageData(img, 0, 0);
+  const map = new THREE.CanvasTexture(c);
+  map.wrapS = map.wrapT = THREE.RepeatWrapping;
+  map.repeat.set(repeat, repeat);
+  map.anisotropy = aniso;
+  return map;
+}
+
 const T = {};
 
 export const TEX = {
@@ -119,6 +140,9 @@ export const TEX = {
       const k = 0.86 + n * 0.12 + (g - 0.5) * 0.05 + (streak - 0.5) * 0.04;
       return [232 * k, 220 * k, 190 * k, 0.55 + (n - 0.5) * 0.5];
     }, { repeat: 1 });
+    T.plaster.roughness = proceduralRoughness(512, (u, v) => {
+      return 0.88 + fbm(u * 60, v * 60, 3) * 0.12;
+    });
     return T.plaster;
   },
   stone() {
@@ -138,7 +162,8 @@ export const TEX = {
       const s = fbm(u * 260, v * 260, 2);
       const fleck = s > 0.62 ? 1 : 0;
       const k = 0.72 + n * 0.5;
-      return [92 * k + fleck * 60, 66 * k + fleck * 55, 58 * k + fleck * 50, 0.45 + (n - 0.5) * 0.7];
+      // Red-brown polished granite as seen in photos
+      return [148 * k + fleck * 40, 82 * k + fleck * 35, 72 * k + fleck * 30, 0.3 + (n - 0.5) * 0.4];
     }, { repeat: 2 });
     return T.granite;
   },
@@ -151,13 +176,20 @@ export const TEX = {
       const fx = (i % cell) / cell, fy = (j % cell) / cell;
       const joint = Math.min(fx, 1 - fx, fy, 1 - fy) < 0.035 ? 1 : 0;
       const n = fbm(u * 40, v * 40, 3);
+      // Terracotta-pink paving as in the real photos
       const tone = 0.82 + rnd * 0.3 + (n - 0.5) * 0.14;
-      const base = [168, 158, 152];
-      const r = joint ? 96 : base[0] * tone;
-      const g = joint ? 92 : base[1] * tone;
-      const b = joint ? 90 : base[2] * tone;
+      const base = [196, 136, 118];
+      const r = joint ? 128 : base[0] * tone;
+      const g = joint ? 118 : base[1] * tone;
+      const b = joint ? 112 : base[2] * tone;
       return [r, g, b, joint ? 0.05 : 0.55 + (n - 0.5) * 0.3];
     }, { repeat: 1 });
+    T.paving.roughness = proceduralRoughness(512, (u, v, i, j) => {
+      const cell2 = 64;
+      const fx = (i % cell2) / cell2, fy = (j % cell2) / cell2;
+      const joint = Math.min(fx, 1 - fx, fy, 1 - fy) < 0.035 ? 1 : 0;
+      return joint ? 0.98 : 0.72 + fbm(u * 40, v * 40, 2) * 0.18;
+    });
     return T.paving;
   },
   brickPaving() {
@@ -172,7 +204,7 @@ export const TEX = {
       const joint = Math.min(fx, 1 - fx) < 0.045 || Math.min(fy, 1 - fy) < 0.09;
       const n = fbm(u * 60, v * 60, 3);
       const tone = 0.8 + rnd * 0.4;
-      const base = [176, 112, 100];
+      const base = [186, 122, 108];
       return joint ? [150, 142, 136, 0.1] : [base[0] * tone, base[1] * tone, base[2] * tone, 0.55 + (n - 0.5) * 0.3];
     }, { repeat: 1 });
     return T.brick;
@@ -216,10 +248,35 @@ export const TEX = {
       const warp = fbm(u * 5, v * 26, 4);
       const grain = Math.sin((v * 46 + warp * 9) * Math.PI) * 0.5 + 0.5;
       const fine = fbm(u * 120, v * 300, 2);
-      const k = 0.68 + grain * 0.24 + (fine - 0.5) * 0.12;
-      return [86 * k, 56 * k, 38 * k, 0.45 + grain * 0.3];
+      const k = 0.78 + grain * 0.18 + (fine - 0.5) * 0.08;
+      return [224 * k, 198 * k, 162 * k, 0.45 + grain * 0.25];
     }, { repeat: 1 });
     return T.wood;
+  },
+  oakLaminate() {
+    if (T.oakLam) return T.oakLam;
+    T.oakLam = procedural(512, (u, v) => {
+      const board = Math.floor(v * 8);
+      const br = mulberry32(board * 317)();
+      const warp = fbm(u * 4, v * 32, 4);
+      const grain = Math.sin((v * 52 + warp * 7) * Math.PI) * 0.5 + 0.5;
+      const fine = fbm(u * 100, v * 260, 2);
+      const k = 0.86 + grain * 0.11 + (fine - 0.5) * 0.05 + br * 0.04;
+      const seam = Math.min(v * 8 % 1, 1 - v * 8 % 1) < 0.015 ? 0.78 : 1.0;
+      return [242 * k * seam, 224 * k * seam, 196 * k * seam, 0.45 + grain * 0.2];
+    }, { repeat: 3 });
+    return T.oakLam;
+  },
+  walnut() {
+    if (T.walnut) return T.walnut;
+    T.walnut = procedural(512, (u, v) => {
+      const warp = fbm(u * 6, v * 22, 4);
+      const grain = Math.sin((v * 40 + warp * 11) * Math.PI) * 0.5 + 0.5;
+      const fine = fbm(u * 140, v * 280, 2);
+      const k = 0.74 + grain * 0.22 + (fine - 0.5) * 0.08;
+      return [178 * k, 128 * k, 96 * k, 0.42 + grain * 0.3];
+    }, { repeat: 1 });
+    return T.walnut;
   },
   carpet() {
     if (T.carpet) return T.carpet;
@@ -235,20 +292,20 @@ export const TEX = {
     const S = 512, cell = 128;
     T.ceiling = procedural(S, (u, v, i, j) => {
       const fx = (i % cell) / cell, fy = (j % cell) / cell;
-      const grid = Math.min(fx, 1 - fx, fy, 1 - fy) < 0.012 ? 1 : 0;
+      const grid = Math.min(fx, 1 - fx, fy, 1 - fy) < 0.015 ? 1 : 0;
       const perf = ((i % 8 === 0) && (j % 8 === 0)) ? 1 : 0;
       const n = fbm(u * 30, v * 30, 3);
-      const base = 236 + (n - 0.5) * 6 - perf * 16;
-      return grid ? [188, 186, 180, 0.2] : [base, base, base - 4, 0.6];
-    }, { repeat: 1 });
+      const base = 248 + (n - 0.5) * 4 - perf * 10;
+      return grid ? [210, 212, 216, 0.2] : [base, base, Math.min(255, base + 2), 0.6];
+    }, { repeat: 4 });
     return T.ceiling;
   },
   fabric() {
     if (T.fabric) return T.fabric;
     T.fabric = procedural(256, (u, v) => {
       const n = fbm(u * 260, v * 260, 2);
-      const k = 0.8 + n * 0.35;
-      return [44 * k, 44 * k, 48 * k, 0.5 + (n - 0.5) * 0.4];
+      const k = 0.85 + n * 0.25;
+      return [140 * k, 148 * k, 165 * k, 0.5 + (n - 0.5) * 0.4];
     }, { repeat: 4 });
     return T.fabric;
   },
@@ -270,51 +327,375 @@ export const TEX = {
     }, { repeat: 2 });
     return T.needle;
   },
+  needleBlue() {
+    if (T.needleBlue) return T.needleBlue;
+    T.needleBlue = procedural(256, (u, v) => {
+      const n = fbm(u * 90, v * 90, 4);
+      const k = 0.6 + n * 0.52;
+      // Blue-grey spruce needles
+      return [44 * k, 68 * k, 82 * k, 0.5 + (n - 0.5) * 0.8];
+    }, { repeat: 2 });
+    return T.needleBlue;
+  },
 };
+
+/* --------------------------------------------------------------- canvas textures for interior */
+function makeCanvasTex(w, h, drawFn) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  drawFn(x, w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+function makeICABanner() {
+  return makeCanvasTex(1024, 512, (x, w, h) => {
+    const g = x.createLinearGradient(0, 0, w, h);
+    g.addColorStop(0, '#09438f'); g.addColorStop(0.55, '#0f5ec2'); g.addColorStop(1, '#083a7c');
+    x.fillStyle = g; x.fillRect(0, 0, w, h);
+    // Subtle decorative rays
+    x.strokeStyle = 'rgba(0,220,255,0.18)'; x.lineWidth = 2;
+    for (let i = 0; i < 6; i++) {
+      x.beginPath(); x.moveTo(0, h * (0.15 + i * 0.15)); x.lineTo(w, h * (0.05 + i * 0.16)); x.stroke();
+    }
+    // Kazakhstan map silhouette
+    x.fillStyle = 'rgba(90,190,255,0.26)';
+    x.strokeStyle = 'rgba(130,220,255,0.55)'; x.lineWidth = 3;
+    const pts = [[130,220],[210,145],[390,120],[580,110],[770,135],[890,195],[900,295],[810,360],[650,375],[460,390],[280,365],[165,320]];
+    x.beginPath(); x.moveTo(pts[0][0], pts[0][1]);
+    for (const p of pts) x.lineTo(p[0], p[1]);
+    x.closePath(); x.fill(); x.stroke();
+    // Sun emblem
+    x.fillStyle = '#ffd633';
+    x.beginPath(); x.arc(w * 0.5, h * 0.34, 42, 0, Math.PI * 2); x.fill();
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      x.save(); x.translate(w * 0.5 + Math.cos(a) * 56, h * 0.34 + Math.sin(a) * 56);
+      x.rotate(a); x.fillRect(-3, -10, 6, 20); x.restore();
+    }
+    // Text
+    x.textAlign = 'center'; x.textBaseline = 'middle';
+    x.fillStyle = '#ffffff';
+    x.font = '800 54px "Segoe UI", Arial, sans-serif';
+    x.fillText('ҰЛЫ ДАЛАНЫҢ ҚУАТЫ', w / 2, h * 0.64);
+    x.font = '600 40px "Segoe UI", Arial, sans-serif';
+    x.fillStyle = '#d8efff';
+    x.fillText('ЭНЕРГИЯ ВЕЛИКОЙ СТЕПИ', w / 2, h * 0.77);
+    x.font = '700 32px "Segoe UI", Arial, sans-serif';
+    x.fillStyle = '#6ce2ff';
+    x.fillText('ИНТЕРГАЗ ЦЕНТРАЛЬНАЯ АЗИЯ · QazaqGaz', w / 2, h * 0.90);
+    x.strokeStyle = 'rgba(255,255,255,0.35)'; x.lineWidth = 4;
+    x.strokeRect(18, 18, w - 36, h - 36);
+  });
+}
+
+function makeKZMapGlow() {
+  return makeCanvasTex(1024, 512, (x, w, h) => {
+    const bg = x.createRadialGradient(w * 0.5, h * 0.45, 40, w * 0.5, h * 0.45, w * 0.55);
+    bg.addColorStop(0, '#0d3b7d'); bg.addColorStop(1, '#061533');
+    x.fillStyle = bg; x.fillRect(0, 0, w, h);
+    // Subtle grid
+    x.strokeStyle = 'rgba(0,180,255,0.14)'; x.lineWidth = 1;
+    for (let i = 0; i <= 16; i++) { x.beginPath(); x.moveTo(i * w / 16, 0); x.lineTo(i * w / 16, h); x.stroke(); }
+    for (let i = 0; i <= 8; i++) { x.beginPath(); x.moveTo(0, i * h / 8); x.lineTo(w, i * h / 8); x.stroke(); }
+    // Glowing Kazakhstan map contour
+    const pts = [[105,215],[180,140],[310,130],[440,85],[595,80],[745,105],[880,175],[915,270],[855,345],[725,365],[570,385],[445,395],[315,365],[220,355],[135,310]];
+    x.shadowColor = '#00ccff'; x.shadowBlur = 24;
+    x.strokeStyle = '#38d8ff'; x.lineWidth = 5;
+    x.fillStyle = 'rgba(24,148,255,0.30)';
+    x.beginPath(); x.moveTo(pts[0][0], pts[0][1]);
+    for (const p of pts) x.lineTo(p[0], p[1]);
+    x.closePath(); x.fill(); x.stroke();
+    // Main trunk gas pipelines
+    x.strokeStyle = '#ffd23f'; x.lineWidth = 4; x.shadowColor = '#ffaa00'; x.shadowBlur = 12;
+    const routes = [
+      [[155,210],[255,235],[375,260],[540,315],[730,335],[865,280]],
+      [[155,210],[220,170],[340,165],[520,180],[690,210]],
+      [[255,235],[260,330],[410,360],[540,315]],
+    ];
+    for (const r of routes) {
+      x.beginPath(); x.moveTo(r[0][0], r[0][1]);
+      for (const p of r) x.lineTo(p[0], p[1]);
+      x.stroke();
+    }
+    // Compressor station nodes + Uralsk highlight
+    const cities = [
+      [155, 210, 'УРАЛЬСК', true], [255, 235, 'АКТОБЕ', false], [260, 330, 'АТЫРАУ', false],
+      [520, 180, 'АСТАНА', false], [540, 315, 'ШЫМКЕНТ', false], [730, 335, 'АЛМАТЫ', false],
+    ];
+    for (const [cx, cy, name, hi] of cities) {
+      x.fillStyle = hi ? '#00ffaa' : '#00f5ff';
+      x.shadowColor = hi ? '#00ffaa' : '#00f5ff'; x.shadowBlur = 14;
+      x.beginPath(); x.arc(cx, cy, hi ? 10 : 6, 0, TAU); x.fill();
+      x.shadowBlur = 0;
+      x.fillStyle = hi ? '#aaffdd' : '#e6f6ff';
+      x.font = hi ? '700 22px "Segoe UI", Arial' : '600 18px "Segoe UI", Arial';
+      x.textAlign = 'left';
+      x.fillText(name, cx + 14, cy + 6);
+    }
+    x.shadowBlur = 0;
+    x.fillStyle = '#ffffff'; x.textAlign = 'center';
+    x.font = '800 34px "Segoe UI", Arial, sans-serif';
+    x.fillText('ҚАЗАҚСТАН · МАГИСТРАЛЬНЫЕ ГАЗОПРОВОДЫ ICA', w / 2, h * 0.91);
+    x.strokeStyle = 'rgba(80,200,255,0.5)'; x.lineWidth = 4;
+    x.strokeRect(12, 12, w - 24, h - 24);
+  });
+}
+
+function makeSCADAScreen() {
+  return makeCanvasTex(1024, 512, (x, w, h) => {
+    x.fillStyle = '#071426'; x.fillRect(0, 0, w, h);
+    // Header bar
+    x.fillStyle = '#0d2b52'; x.fillRect(0, 0, w, 58);
+    x.fillStyle = '#00f0ff'; x.fillRect(0, 56, w, 3);
+    // Grid
+    x.strokeStyle = 'rgba(0,160,255,0.16)'; x.lineWidth = 1;
+    for (let i = 0; i < 24; i++) { x.beginPath(); x.moveTo(i * w / 24, 58); x.lineTo(i * w / 24, h); x.stroke(); }
+    for (let i = 1; i < 12; i++) { x.beginPath(); x.moveTo(0, i * h / 12); x.lineTo(w, i * h / 12); x.stroke(); }
+    // Main trunk pipelines (green + cyan active lines)
+    x.lineWidth = 5; x.shadowBlur = 12;
+    x.strokeStyle = '#00ff99'; x.shadowColor = '#00ff99';
+    x.beginPath();
+    x.moveTo(40, 165); x.lineTo(270, 165); x.lineTo(360, 235);
+    x.lineTo(640, 235); x.lineTo(740, 175); x.lineTo(984, 175);
+    x.stroke();
+    x.strokeStyle = '#00d4ff'; x.shadowColor = '#00d4ff';
+    x.beginPath();
+    x.moveTo(40, 325); x.lineTo(240, 325); x.lineTo(340, 375);
+    x.lineTo(660, 375); x.lineTo(760, 305); x.lineTo(984, 305);
+    x.stroke();
+    // Cross-connect bridge
+    x.strokeStyle = '#ffbb33'; x.shadowColor = '#ffbb33'; x.lineWidth = 3;
+    x.beginPath(); x.moveTo(360, 235); x.lineTo(340, 375); x.moveTo(640, 235); x.lineTo(660, 375); x.stroke();
+    // Compressor stations & valves
+    x.shadowBlur = 10;
+    for (const [vx, vy, lbl] of [
+      [270, 165, 'КС-Уральск'], [500, 235, 'КС-Чижа'], [740, 175, 'КС-Джангала'],
+      [240, 325, 'ГРС-1'], [500, 375, 'КС-Тайпак'], [760, 305, 'ГРС-2'],
+    ]) {
+      x.fillStyle = '#0a223a'; x.strokeStyle = '#00ffaa'; x.lineWidth = 3;
+      x.fillRect(vx - 26, vy - 18, 52, 36); x.strokeRect(vx - 26, vy - 18, 52, 36);
+      x.fillStyle = '#ff5544'; x.beginPath(); x.arc(vx, vy, 7, 0, TAU); x.fill();
+      x.shadowBlur = 0; x.fillStyle = '#ffffff'; x.font = '700 16px "Segoe UI", Arial'; x.textAlign = 'center';
+      x.fillText(lbl, vx, vy - 26);
+      x.shadowBlur = 10;
+    }
+    x.shadowBlur = 0;
+    // Live telemetry boxes
+    const boxes = [
+      [50, 82, 'ДАВЛЕНИЕ ВХ', '5.42 МПа', '#00ff99'],
+      [295, 82, 'ДАВЛЕНИЕ ВЫХ', '4.88 МПа', '#00d4ff'],
+      [540, 82, 'РАСХОД ГАЗА', '32.7 тыс.м³/ч', '#ffdd55'],
+      [785, 82, 'ТЕМПЕРАТУРА', '+12.8 °C', '#66eeff'],
+    ];
+    for (const [bx, by, t1, t2, col] of boxes) {
+      x.fillStyle = 'rgba(10,36,68,0.88)'; x.fillRect(bx, by, 200, 56);
+      x.strokeStyle = col; x.lineWidth = 2; x.strokeRect(bx, by, 200, 56);
+      x.fillStyle = '#a0c8e8'; x.font = '600 13px Arial'; x.textAlign = 'left';
+      x.fillText(t1, bx + 12, by + 20);
+      x.fillStyle = col; x.font = '700 22px monospace';
+      x.fillText(t2, bx + 12, by + 46);
+    }
+    // Bottom status bar
+    x.fillStyle = '#0b2242'; x.fillRect(0, h - 44, w, 44);
+    x.fillStyle = '#00ff88'; x.font = '700 18px monospace'; x.textAlign = 'left';
+    x.fillText('● SCADA ONLINE  |  САЦ-УРАЛЬСК  |  РЕЖИМ: ШТАТНЫЙ', 24, h - 16);
+    // Title
+    x.fillStyle = '#ffffff'; x.font = '800 26px "Segoe UI", Arial'; x.textAlign = 'center';
+    x.fillText('УМГ «УРАЛЬСК» — ЦЕНТРАЛЬНАЯ ДИСПЕТЧЕРСКАЯ · МНЕМОСХЕМА', w / 2, 36);
+  });
+}
+
+function makeOfficeScreen() {
+  return makeCanvasTex(512, 256, (x, w, h) => {
+    x.fillStyle = '#1a2744'; x.fillRect(0, 0, w, h);
+    x.fillStyle = '#0d6efd'; x.fillRect(0, 0, w, 32);
+    x.fillStyle = '#fff'; x.font = '14px Arial'; x.textAlign = 'left';
+    x.fillText('Excel — Отчёт за квартал.xlsx', 12, 22);
+    // Fake spreadsheet grid
+    x.strokeStyle = 'rgba(255,255,255,0.1)'; x.lineWidth = 1;
+    for (let r = 0; r < 8; r++) for (let c = 0; c < 6; c++) {
+      x.strokeRect(c * w / 6, 36 + r * 26, w / 6, 26);
+    }
+    x.fillStyle = 'rgba(100,180,255,0.3)'; x.fillRect(0, 36, w / 6, 26);
+    x.fillStyle = '#aacfff'; x.font = '11px monospace';
+    for (let r = 0; r < 7; r++) x.fillText(`${(r + 1) * 1234}`, w / 6 + 8, 54 + r * 26);
+  });
+}
+
+function makePainting() {
+  return makeCanvasTex(512, 384, (x, w, h) => {
+    // Steppe landscape
+    const sky = x.createLinearGradient(0, 0, 0, h * 0.6);
+    sky.addColorStop(0, '#5a8cc0'); sky.addColorStop(1, '#c8dce8');
+    x.fillStyle = sky; x.fillRect(0, 0, w, h * 0.6);
+    // Hills
+    const hill = x.createLinearGradient(0, h * 0.5, 0, h);
+    hill.addColorStop(0, '#8aaa6a'); hill.addColorStop(1, '#6a8a4a');
+    x.fillStyle = hill;
+    x.beginPath(); x.moveTo(0, h * 0.6);
+    x.quadraticCurveTo(w * 0.3, h * 0.42, w * 0.5, h * 0.56);
+    x.quadraticCurveTo(w * 0.7, h * 0.48, w, h * 0.58);
+    x.lineTo(w, h); x.lineTo(0, h); x.fill();
+    // Frame
+    x.strokeStyle = '#8a7044'; x.lineWidth = 8;
+    x.strokeRect(4, 4, w - 8, h - 8);
+  });
+}
 
 /* --------------------------------------------------------------- materials */
 export function makeMaterials(env) {
-  const plaster = TEX.plaster(), stone = TEX.stone(), granite = TEX.granite();
+  const plasterT = TEX.plaster(), stone = TEX.stone(), granite = TEX.granite();
   const paving = TEX.paving(), brick = TEX.brickPaving(), asphalt = TEX.asphalt();
-  const grass = TEX.grass(), marble = TEX.marble(), wood = TEX.wood();
-  const carpet = TEX.carpet(), ceil = TEX.ceiling(), fabric = TEX.fabric();
+  const grassT = TEX.grass(), marbleT = TEX.marble(), wood = TEX.wood();
+  const oakLam = TEX.oakLaminate(), walnutT = TEX.walnut();
+  const carpet = TEX.carpet(), ceil = TEX.ceiling(), fabricT = TEX.fabric();
+  const needleBlue = TEX.needleBlue();
 
   const M = {
-    plaster: new THREE.MeshStandardMaterial({ color: 0xe6d9bb, map: plaster.map, bumpMap: plaster.bump, bumpScale: 0.35, roughness: 0.94, metalness: 0 }),
-    plasterWarm: new THREE.MeshStandardMaterial({ color: 0xdecba6, map: plaster.map, bumpMap: plaster.bump, bumpScale: 0.3, roughness: 0.95 }),
-    stone: new THREE.MeshStandardMaterial({ color: 0xf6f3ea, map: stone.map, bumpMap: stone.bump, bumpScale: 0.2, roughness: 0.82 }),
-    granite: new THREE.MeshStandardMaterial({ color: 0x8d6a5f, map: granite.map, bumpMap: granite.bump, bumpScale: 0.5, roughness: 0.55 }),
-    graniteDark: new THREE.MeshStandardMaterial({ color: 0x5c4a45, map: granite.map, bumpMap: granite.bump, bumpScale: 0.5, roughness: 0.5 }),
-    paving: new THREE.MeshStandardMaterial({ color: 0xb9aca4, map: paving.map, bumpMap: paving.bump, bumpScale: 0.4, roughness: 0.88 }),
-    brick: new THREE.MeshStandardMaterial({ color: 0xb08076, map: brick.map, bumpMap: brick.bump, bumpScale: 0.4, roughness: 0.9 }),
-    asphalt: new THREE.MeshStandardMaterial({ color: 0x6a6a6c, map: asphalt.map, bumpMap: asphalt.bump, bumpScale: 0.25, roughness: 0.96 }),
-    grass: new THREE.MeshStandardMaterial({ color: 0x86a06a, map: grass.map, bumpMap: grass.bump, bumpScale: 0.4, roughness: 1 }),
-    marble: new THREE.MeshStandardMaterial({ color: 0xf2ece2, map: marble.map, bumpMap: marble.bump, bumpScale: 0.06, roughness: 0.28, metalness: 0.02, envMapIntensity: 0.8 }),
-    wood: new THREE.MeshStandardMaterial({ color: 0x6a4630, map: wood.map, bumpMap: wood.bump, bumpScale: 0.25, roughness: 0.55 }),
-    carpet: new THREE.MeshStandardMaterial({ color: 0xc9bda6, map: carpet.map, bumpMap: carpet.bump, bumpScale: 0.3, roughness: 0.98 }),
-    ceiling: new THREE.MeshStandardMaterial({ color: 0xf4f2ec, map: ceil.map, roughness: 0.92 }),
-    fabric: new THREE.MeshStandardMaterial({ color: 0x24242a, map: fabric.map, bumpMap: fabric.bump, bumpScale: 0.2, roughness: 0.92 }),
+    /* ==================== EXTERIOR ==================== */
+    plaster: new THREE.MeshStandardMaterial({
+      color: 0xe6dcc0, map: plasterT.map, bumpMap: plasterT.bump, bumpScale: 0.35,
+      roughness: 0.92, roughnessMap: plasterT.roughness, metalness: 0,
+      side: THREE.DoubleSide,
+    }),
+    plasterWarm: new THREE.MeshStandardMaterial({
+      color: 0xdecba6, map: plasterT.map, bumpMap: plasterT.bump, bumpScale: 0.3, roughness: 0.95,
+    }),
+    stone: new THREE.MeshStandardMaterial({
+      color: 0xf6f3ea, map: stone.map, bumpMap: stone.bump, bumpScale: 0.2, roughness: 0.82,
+    }),
+    granite: new THREE.MeshStandardMaterial({
+      color: 0x9a6858, map: granite.map, bumpMap: granite.bump, bumpScale: 0.5,
+      roughness: 0.42, metalness: 0.02, envMapIntensity: 0.9,
+    }),
+    graniteDark: new THREE.MeshStandardMaterial({
+      color: 0x5c4a45, map: granite.map, bumpMap: granite.bump, bumpScale: 0.5, roughness: 0.5,
+    }),
+    paver: new THREE.MeshStandardMaterial({
+      color: 0xc4917a, map: paving.map, bumpMap: paving.bump, bumpScale: 0.5,
+      roughness: 0.78, roughnessMap: paving.roughness,
+    }),
+    paving: new THREE.MeshStandardMaterial({
+      color: 0xb9aca4, map: paving.map, bumpMap: paving.bump, bumpScale: 0.4, roughness: 0.88,
+    }),
+    brick: new THREE.MeshStandardMaterial({
+      color: 0xb88474, map: brick.map, bumpMap: brick.bump, bumpScale: 0.4, roughness: 0.9,
+    }),
+    asphalt: new THREE.MeshStandardMaterial({
+      color: 0x6a6a6c, map: asphalt.map, bumpMap: asphalt.bump, bumpScale: 0.25, roughness: 0.96,
+    }),
+    grass: new THREE.MeshStandardMaterial({
+      color: 0x86a06a, map: grassT.map, bumpMap: grassT.bump, bumpScale: 0.4, roughness: 1,
+    }),
     metalDark: new THREE.MeshStandardMaterial({ color: 0x2b2b2d, metalness: 0.85, roughness: 0.42 }),
     metalWhite: new THREE.MeshStandardMaterial({ color: 0xf2f0ea, metalness: 0.35, roughness: 0.45 }),
+    chrome: new THREE.MeshStandardMaterial({ color: 0xe8e8ea, metalness: 0.95, roughness: 0.12, envMapIntensity: 1.8 }),
     roof: new THREE.MeshStandardMaterial({ color: 0x4a4b4d, roughness: 0.9, metalness: 0.1 }),
     concrete: new THREE.MeshStandardMaterial({ color: 0xb8b4ac, roughness: 0.92 }),
-    lampGlow: new THREE.MeshStandardMaterial({ color: 0xfff4de, emissive: 0xffe6bd, emissiveIntensity: 1.1, roughness: 0.4 }),
+    lampGlow: new THREE.MeshStandardMaterial({
+      color: 0xfff4de, emissive: 0xffe6bd, emissiveIntensity: 1.1, roughness: 0.4,
+    }),
     signBlue: new THREE.MeshStandardMaterial({ color: 0x0b4a8c, roughness: 0.5, metalness: 0.1 }),
+
+    /* ---- Trees/vegetation ---- */
+    spruceBlue: new THREE.MeshStandardMaterial({
+      color: 0x4a7a90, roughness: 0.92, map: needleBlue.map, bumpMap: needleBlue.bump, bumpScale: 0.5,
+    }),
+    spruceGreen: new THREE.MeshStandardMaterial({
+      color: 0x3f6d5c, roughness: 0.92, map: TEX.needle().map, bumpMap: TEX.needle().bump, bumpScale: 0.5,
+    }),
+    roseRed: new THREE.MeshStandardMaterial({ color: 0xd42040, roughness: 0.82 }),
+    hedge: new THREE.MeshStandardMaterial({ color: 0x3a6830, roughness: 0.95, map: TEX.needle().map }),
+
+    /* ==================== INTERIOR ==================== */
+    marbleFloor: new THREE.MeshStandardMaterial({
+      color: 0xf0eae0, map: marbleT.map, bumpMap: marbleT.bump, bumpScale: 0.06,
+      roughness: 0.32, metalness: 0.02, envMapIntensity: 0.72, side: THREE.DoubleSide,
+    }),
+    oakLaminate: new THREE.MeshStandardMaterial({
+      color: 0xd8b684, map: oakLam.map, bumpMap: oakLam.bump, bumpScale: 0.16,
+      roughness: 0.38, metalness: 0, side: THREE.DoubleSide,
+    }),
+    plasterWall: new THREE.MeshStandardMaterial({ color: 0xf5f6f8, roughness: 0.88, metalness: 0, envMapIntensity: 0.28, side: THREE.DoubleSide }),
+    walnutDoor: new THREE.MeshStandardMaterial({
+      color: 0x8a5234, map: walnutT.map, bumpMap: walnutT.bump, bumpScale: 0.25,
+      roughness: 0.46, metalness: 0, envMapIntensity: 0.35,
+    }),
+    frostedGlass: new THREE.MeshPhysicalMaterial({
+      color: 0xe8eef4, metalness: 0, roughness: 0.55, transparent: true, opacity: 0.42,
+      envMapIntensity: 0.5, side: THREE.DoubleSide, depthWrite: false,
+      clearcoat: 0.5, clearcoatRoughness: 0.4,
+    }),
+    guardDesk: new THREE.MeshStandardMaterial({ color: 0xd4d8e0, roughness: 0.65, metalness: 0.05, envMapIntensity: 0.35 }),
+    leatherBlack: new THREE.MeshStandardMaterial({ color: 0x262932, roughness: 0.48, metalness: 0.04, envMapIntensity: 0.55 }),
+    fabric: new THREE.MeshStandardMaterial({
+      color: 0x35445c, map: fabricT.map, bumpMap: fabricT.bump, bumpScale: 0.18, roughness: 0.85, envMapIntensity: 0.25,
+    }),
+    woodLight: new THREE.MeshStandardMaterial({
+      color: 0xd8b886, map: wood.map, bumpMap: wood.bump, bumpScale: 0.15, roughness: 0.44, envMapIntensity: 0.35,
+    }),
+    blind: new THREE.MeshStandardMaterial({ color: 0xede5d4, roughness: 0.88, envMapIntensity: 0.25, side: THREE.DoubleSide }),
+    ceiling: new THREE.MeshStandardMaterial({ color: 0xf4f6f9, map: ceil.map, roughness: 0.92, envMapIntensity: 0.28, side: THREE.DoubleSide }),
+    lampPanel: new THREE.MeshStandardMaterial({
+      color: 0xffffff, emissive: 0xfff8ea, emissiveIntensity: 1.5, roughness: 0.35,
+    }),
+    fireRed: new THREE.MeshStandardMaterial({ color: 0xcc2020, roughness: 0.75 }),
+
+    /* Canvas-based textures for interior features — low envMap + clean emissiveMap so graphics stay rich & crisp */
+    icaBanner: (() => {
+      const tex = makeICABanner();
+      return new THREE.MeshStandardMaterial({
+        map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.55,
+        roughness: 0.85, metalness: 0, envMapIntensity: 0.12, side: THREE.DoubleSide,
+      });
+    })(),
+    kzMapGlow: (() => {
+      const tex = makeKZMapGlow();
+      return new THREE.MeshStandardMaterial({
+        map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.85,
+        roughness: 0.75, metalness: 0, envMapIntensity: 0.12, side: THREE.DoubleSide,
+      });
+    })(),
+    scadaScreen: (() => {
+      const tex = makeSCADAScreen();
+      return new THREE.MeshStandardMaterial({
+        map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.88,
+        roughness: 0.72, metalness: 0, envMapIntensity: 0.1, side: THREE.DoubleSide,
+      });
+    })(),
+    officeScreen: (() => {
+      const tex = makeOfficeScreen();
+      return new THREE.MeshStandardMaterial({
+        map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.65,
+        roughness: 0.55, metalness: 0, envMapIntensity: 0.15,
+      });
+    })(),
+    painting: new THREE.MeshStandardMaterial({ map: makePainting(), roughness: 0.75, envMapIntensity: 0.25 }),
   };
 
+  /* ---- Glass materials (MeshPhysicalMaterial) ---- */
   M.glass = new THREE.MeshPhysicalMaterial({
     color: 0xcfe0e6, metalness: 0, roughness: 0.06, transparent: true, opacity: 0.28,
     envMapIntensity: 1.6, side: THREE.DoubleSide, depthWrite: false,
-    clearcoat: 1, clearcoatRoughness: 0.04,
+    clearcoat: 1, clearcoatRoughness: 0.04, reflectivity: 1,
   });
   M.glassTint = new THREE.MeshPhysicalMaterial({
-    color: 0x8fa9b4, metalness: 0.15, roughness: 0.05, transparent: true, opacity: 0.5,
-    envMapIntensity: 2.0, side: THREE.DoubleSide, depthWrite: false,
-    clearcoat: 1, clearcoatRoughness: 0.03,
+    color: 0x6a8898, metalness: 0.2, roughness: 0.05, transparent: true, opacity: 0.55,
+    envMapIntensity: 2.2, side: THREE.DoubleSide, depthWrite: false,
+    clearcoat: 1, clearcoatRoughness: 0.03, reflectivity: 1,
   });
   M.glassDark = new THREE.MeshPhysicalMaterial({
     color: 0x2c3a42, metalness: 0.4, roughness: 0.08, transparent: true, opacity: 0.72,
     envMapIntensity: 1.4, side: THREE.DoubleSide,
+  });
+  M.glassBronze = new THREE.MeshPhysicalMaterial({
+    color: 0x5a4a38, metalness: 0.3, roughness: 0.06, transparent: true, opacity: 0.58,
+    envMapIntensity: 2.0, side: THREE.DoubleSide, depthWrite: false,
+    clearcoat: 1, clearcoatRoughness: 0.03, reflectivity: 1,
   });
 
   for (const k of Object.keys(M)) {

@@ -1,6 +1,7 @@
 /* Main entry point: WebGLRenderer (AgX + PMREM sky IBL + soft shadows + FogExp2),
+   EffectComposer (UnrealBloomPass threshold 0.92 / strength 0.22 + SMAAPass + OutputPass),
    building/interior/site/character assembly, time-of-day presets, quality scaling,
-   UI bindings and automation hooks (window.__app, window.__ready). */
+   UI bindings, viewpoints and automation hooks. */
 
 import * as THREE from 'three';
 import {
@@ -12,13 +13,20 @@ import { buildSite } from './site.js';
 import { buildCharacter } from './character.js';
 import { createController, VIEWPOINTS } from './controls.js';
 
+/* ---- Postprocessing ---- */
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
 const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const isMobile = window.innerWidth <= 640 || /iPhone|Android|Mobile/i.test(navigator.userAgent);
 
 const canvas = document.getElementById('viewport');
 const renderer = new THREE.WebGLRenderer({
   canvas,
-  antialias: true,
+  antialias: false, // SMAA replaces native AA for better perf
   powerPreference: 'high-performance',
 });
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -79,7 +87,7 @@ scene.add(sunLight);
 const hemiLight = new THREE.HemisphereLight(0x9fc0e0, 0x6b6458, 0.85);
 scene.add(hemiLight);
 
-// Subtle architectural uplights on the rotunda for golden/night atmosphere
+// Architectural uplights
 const nightLights = [];
 for (const [x, y, z, col, dist] of [
   [0, PODIUM + 2.6, 17.2, 0xffe4b8, 24],
@@ -100,12 +108,35 @@ const colliders = [];
 
 buildBuilding(scene, M, colliders);
 buildInteriorShell(scene, M);
-const interiorGroup = buildInteriors(scene, M, colliders);
+const interior = buildInteriors(scene, M, colliders);
 const { flagGroup } = buildSite(scene, M, nightLights);
 
 const character = buildCharacter();
 character.root.visible = false;
 scene.add(character.root);
+
+/* ---- Resolve interior return contract (Group, or {group, lights, update}) ---- */
+const interiorGroup = interior instanceof THREE.Group ? interior : (interior && interior.group ? interior.group : interior);
+const interiorLights = (interior && interior.lights) ? interior.lights : (interiorGroup && interiorGroup.userData && interiorGroup.userData.lights) || [];
+const interiorUpdate = (interior && typeof interior.update === 'function') ? interior.update : (interiorGroup && interiorGroup.userData && typeof interiorGroup.userData.update === 'function') ? interiorGroup.userData.update : null;
+
+/* --------------------------------------------------------- postprocessing */
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.22,   // strength — subtle, only on emissives
+  0.4,    // radius
+  0.92    // threshold — high, so only lamps/screens bloom
+);
+composer.addPass(bloomPass);
+
+const smaaPass = new SMAAPass(window.innerWidth, window.innerHeight);
+composer.addPass(smaaPass);
+
+const outputPass = new OutputPass();
+composer.addPass(outputPass);
 
 /* ----------------------------------------------------------------- quality */
 let quality = isMobile ? 'med' : 'high';
@@ -113,8 +144,13 @@ function setQuality(q) {
   if (q !== 'high' && q !== 'med' && q !== 'low') return;
   quality = q;
   const maxDpr = q === 'high' ? 2 : q === 'med' ? 1.5 : 1;
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, maxDpr));
+  const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+  renderer.setPixelRatio(dpr);
   renderer.setSize(window.innerWidth, window.innerHeight, false);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  composer.setPixelRatio(dpr);
+
+  bloomPass.resolution.set(window.innerWidth, window.innerHeight);
 
   const shadowRes = q === 'high' ? 2048 : q === 'med' ? 1024 : 512;
   if (sunLight.shadow.mapSize.x !== shadowRes) {
@@ -153,18 +189,24 @@ function setTime(key) {
   scene.fog.density = mode.fogD;
   renderer.toneMappingExposure = mode.exposure;
 
-  // Street lamps + architectural lights + interior glow
   const isNight = !!mode.night;
   const isGolden = key === 'golden';
   const lampPower = isNight ? 18 : isGolden ? 5 : 0;
   for (const l of nightLights) l.intensity = lampPower;
 
-  const intLights = interiorGroup.userData.lights || [];
-  const intPower = isNight ? 5.5 : isGolden ? 3.2 : 2.2;
-  for (const l of intLights) l.intensity = intPower;
+  const intPower = isNight ? 18 : isGolden ? 14 : 12;
+  for (const l of interiorLights) {
+    l.intensity = intPower * (l.userData.weight ?? 0.34);
+    l.distance = 32;
+    l.decay = 1.3;
+  }
 
-  if (M.lampGlow) M.lampGlow.emissiveIntensity = isNight ? 2.6 : isGolden ? 1.6 : 0.7;
-  if (M.lampPanel) M.lampPanel.emissiveIntensity = isNight ? 2.8 : 1.6;
+  if (M.lampGlow) M.lampGlow.emissiveIntensity = isNight ? 2.6 : isGolden ? 1.6 : 1.2;
+  if (M.lampPanel) M.lampPanel.emissiveIntensity = isNight ? 3.0 : 2.4;
+
+  // Adjust bloom for night
+  bloomPass.strength = isNight ? 0.35 : isGolden ? 0.26 : 0.22;
+
   syncUI();
 }
 
@@ -195,7 +237,7 @@ function syncUI(passedState) {
   if (helpText) {
     helpText.innerHTML = st.mode === 'drone'
       ? '<b>Дрон:</b> WASD — пролёт · Q/E — высота · Shift — быстрее · Мышь — обзор · Колесо — зум'
-      : '<b>Человек:</b> WASD — шаг · Shift — быстрее · Space — прыжок · Посмотрите вниз, чтобы увидеть смокинг';
+      : '<b>Человек:</b> WASD — шаг · Shift — быстрее · Space — прыжок · E — лифт · Посмотрите вниз, чтобы увидеть смокинг';
   }
   if (mobilePad) {
     mobilePad.classList.toggle('visible', isMobile && st.mode === 'human');
@@ -207,6 +249,10 @@ controller = createController(camera, canvas, colliders, character, {
   reducedMotion,
   onStateChange: (st) => syncUI(st),
 });
+if (interiorGroup && interiorGroup.userData && interiorGroup.userData.elevator && controller.setElevatorRef) {
+  const ev = interiorGroup.userData.elevator;
+  controller.setElevatorRef(ev.cabin, ev.doorParts, ev.levels);
+}
 
 modeBtns.forEach((b) => b.addEventListener('click', () => controller.setMode(b.dataset.mode)));
 timeBtns.forEach((b) => b.addEventListener('click', () => setTime(b.dataset.time)));
@@ -224,7 +270,7 @@ if (helpBtn && helpCard) {
   helpBtn.addEventListener('click', () => helpCard.classList.toggle('hidden'));
 }
 
-// Mobile virtual joystick for Human mode
+// Mobile virtual joystick
 if (mobilePad) {
   const knob = mobilePad.querySelector('.pad-knob');
   let padTouch = null;
@@ -289,6 +335,12 @@ function animate(now) {
 
   controller.update(dt);
 
+  // Interior update (pass player position for proximity interactions)
+  if (interiorUpdate) {
+    const playerPos = controller.getPlayerPos ? controller.getPlayerPos() : null;
+    interiorUpdate(dt, playerPos);
+  }
+
   // Subtle cloth wave on flags
   if (!reducedMotion && flagMeshes.length) {
     for (const f of flagMeshes) {
@@ -303,7 +355,8 @@ function animate(now) {
     }
   }
 
-  renderer.render(scene, camera);
+  // Render through the postprocessing composer
+  composer.render(dt);
 }
 
 // Hide preloader smoothly
