@@ -37,7 +37,7 @@ const sky = createSky();
 scene.add(sky.mesh);
 
 const pmrem = new THREE.PMREMGenerator(renderer);
-pmrem.compileEquirectangularShader();
+pmrem.compileCubemapShader();
 const envScene = new THREE.Scene();
 const envSky = createSky();
 envScene.add(envSky.mesh);
@@ -128,12 +128,13 @@ function setQuality(q) {
 }
 
 /* ------------------------------------------------------------- time of day */
-let timeKey = 'day';
+let timeKey = null;
 function setTime(key) {
   const mode = TIME_MODES[key];
   if (!mode) return;
+  const skipEnv = (timeKey === null && key === 'day' && currentEnvRT);
   timeKey = key;
-  const envTex = rebuildEnv(mode);
+  const envTex = skipEnv ? currentEnvRT.texture : rebuildEnv(mode);
   for (const k of Object.keys(M)) {
     if (M[k] && (M[k].isMeshStandardMaterial || M[k].isMeshPhysicalMaterial)) {
       M[k].envMap = envTex;
@@ -292,10 +293,11 @@ function animate(now) {
   if (!reducedMotion && flagMeshes.length) {
     for (const f of flagMeshes) {
       const pos = f.geometry.attributes.position;
+      const base = f.userData.baseZ;
       const ph = f.userData.wave + elapsed * 3.1;
       for (let i = 0; i < pos.count; i++) {
         const u = (pos.getX(i) + 1.3) / 2.6;
-        pos.setZ(i, Math.sin(u * 6.2 - ph) * 0.14 * u);
+        pos.setZ(i, base[i * 3 + 2] + Math.sin(u * 6.2 - ph) * 0.14 * u);
       }
       pos.needsUpdate = true;
     }
