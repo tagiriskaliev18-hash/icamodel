@@ -472,60 +472,98 @@ function buildTurnstiles(scene, y) {
 }
 
 /* ============================================================ SEMICIRCULAR STAIRS */
+const _stairUp = new THREE.Vector3(0, 1, 0);
+function addStairRailSeg(batch, railMat, x0, y0, z0, x1, y1, z1, radius = 0.032) {
+  const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1e-4) return;
+  const dir = new THREE.Vector3(dx / len, dy / len, dz / len);
+  const q = new THREE.Quaternion().setFromUnitVectors(_stairUp, dir);
+  const m = new THREE.Matrix4().compose(
+    new THREE.Vector3((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2),
+    q,
+    new THREE.Vector3(1, 1, 1)
+  );
+  batch.add(new THREE.CylinderGeometry(radius, radius, len + 0.024, 8), railMat, m);
+}
+
 function buildGrandStairs(batch, M, colliders) {
   // Two symmetrical semicircular stairs as per f1_rot.jpg
-  // Left stair: arc from ~225° to ~315° (south-west to north-west)
-  // Right stair: arc from ~225° to ~315° mirrored (south-east to north-east)
   const rInner = 4.6, rOuter = 6.6;
   const stairW = rOuter - rInner;
   const rMid = (rInner + rOuter) / 2;
   const stepsPerFlight = 20;
-  const risePer = 3.6 / stepsPerFlight; // height of one step
+  const risePer = 3.6 / stepsPerFlight; // height of one step (0.18m)
+  const treadT = 0.05;
   const marbleMat = mat(M, 'marbleFloor', 'marble');
+  const stoneMat = mat(M, 'stone');
   const glassMat = mat(M, 'glass', 'glassTint');
+  const chromeMat = mat(M, 'chrome', 'metalDark');
+  const railMat = mat(M, 'walnutDoor', 'woodLight');
 
   // Build stairs for levels 0→1 and 1→2
   for (let level = 0; level < 2; level++) {
     const baseY = FLOOR[level];
-    // Left stair: arc from 200° to 340° (CCW seen from top)
-    // Right stair: arc from 20° to 160°
+    // Left stair: arc from 200° to 340°; Right stair: arc from 20° to 160°
     const arcs = [
-      { a0: 200 * DEG, a1: 340 * DEG, dir: 1, label: 'left' },
-      { a0: 20 * DEG, a1: 160 * DEG, dir: 1, label: 'right' },
+      { a0: 200 * DEG, a1: 340 * DEG },
+      { a0: 20 * DEG, a1: 160 * DEG },
     ];
 
     for (const arc of arcs) {
       const aSpan = arc.a1 - arc.a0;
+      const stepAng = aSpan / stepsPerFlight;
       for (let i = 0; i < stepsPerFlight; i++) {
-        const t = i / stepsPerFlight;
-        const a = arc.a0 + t * aSpan;
+        const a = arc.a0 + (i + 0.5) * stepAng;
         const stepY = baseY + (i + 1) * risePer;
         const p = polar(a, rMid);
         const ry = Math.atan2(Math.sin(a), -Math.cos(a));
-        const stepW = (2 * Math.PI * rMid / stepsPerFlight) * (aSpan / (Math.PI * 2)) * stepsPerFlight / stepsPerFlight;
-        const w = Math.max(0.6, (2 * Math.PI * rMid * Math.abs(aSpan)) / stepsPerFlight);
-        // tread
-        batch.box(marbleMat, w * 1.05, 0.05, stairW, p.x, stepY, p.z, ry);
-        // riser
-        batch.box(mat(M, 'stone'), w * 1.05, risePer, 0.04, p.x, stepY - risePer / 2, p.z, ry);
+        const w = Math.max(0.58, (2 * Math.PI * rMid * Math.abs(aSpan)) / stepsPerFlight);
+        // Tiny Y-epsilon per odd/even step prevents any coplanar z-fighting where lower treads overlap at rInner
+        const yEps = (i % 2) * 0.0015;
+        // Tread (top flush at stepY)
+        batch.box(marbleMat, w * 1.02, treadT, stairW, p.x, stepY - treadT / 2 + yEps, p.z, ry);
+        // Riser cleanly underneath tread leading edge (no overlap with adjacent steps or floor slab)
+        const aLead = arc.a0 + i * stepAng;
+        const pLead = polar(aLead, rMid);
+        const ryLead = Math.atan2(Math.sin(aLead), -Math.cos(aLead));
+        const riserH = risePer - treadT - 0.004;
+        batch.box(stoneMat, 0.04, riserH, stairW - 0.04, pLead.x, stepY - treadT - riserH / 2 - 0.002, pLead.z, ryLead);
+      }
 
-        // balustrade: chrome posts + glass panels on the outer edge
-        if (i % 3 === 0) {
-          const pOuter = polar(a, rOuter - 0.1);
-          batch.cyl(mat(M, 'chrome', 'metalDark'), 0.02, 0.02, 0.95, 6, pOuter.x, stepY + 0.47, pOuter.z);
-          // glass panel
-          if (i > 0) {
-            const pPrev = polar(arc.a0 + ((i - 3) / stepsPerFlight) * aSpan, rOuter - 0.1);
-            const mx = (pOuter.x + pPrev.x) / 2;
-            const mz = (pOuter.z + pPrev.z) / 2;
-            const panW = Math.hypot(pOuter.x - pPrev.x, pOuter.z - pPrev.z);
-            const panRy = Math.atan2(pOuter.x - pPrev.x, pOuter.z - pPrev.z);
-            batch.box(glassMat, panW, 0.7, 0.01,
-              mx, stepY + 0.35 - risePer, mz, panRy);
+      // Continuous curved inner & outer balustrades (posts + aligned glass panels + curved handrails)
+      const postSteps = [0, 3, 6, 9, 12, 15, 18, stepsPerFlight];
+      const railSegs = 28;
+      for (const edgeR of [rInner + 0.08, rOuter - 0.08]) {
+        for (let k = 0; k < postSteps.length; k++) {
+          const si = postSteps[k];
+          const t = si / stepsPerFlight;
+          const a = arc.a0 + t * aSpan;
+          const pEdge = polar(a, edgeR);
+          const baseH = baseY + t * 3.6;
+          batch.cyl(chromeMat, 0.022, 0.022, 0.95, 6, pEdge.x, baseH + 0.475, pEdge.z);
+
+          if (k > 0) {
+            const prevSi = postSteps[k - 1];
+            const tPrev = prevSi / stepsPerFlight;
+            const pPrev = polar(arc.a0 + tPrev * aSpan, edgeR);
+            const prevBaseH = baseY + tPrev * 3.6;
+            const dx = pEdge.x - pPrev.x, dz = pEdge.z - pPrev.z;
+            const panW = Math.hypot(dx, dz);
+            const panRy = Math.atan2(-dz, dx);
+            batch.box(glassMat, panW, 0.68, 0.012,
+              (pEdge.x + pPrev.x) / 2, (baseH + prevBaseH) / 2 + 0.46, (pEdge.z + pPrev.z) / 2, panRy);
           }
-          // wooden handrail
-          const pHand = polar(a, rOuter - 0.05);
-          batch.box(mat(M, 'wood'), 0.06, 0.04, 0.06, pHand.x, stepY + 0.95, pHand.z, ry);
+        }
+
+        // Continuous curved handrail following the spiral treads
+        for (let k = 0; k < railSegs; k++) {
+          const t0 = k / railSegs, t1 = (k + 1) / railSegs;
+          const p0 = polar(arc.a0 + t0 * aSpan, edgeR);
+          const p1 = polar(arc.a0 + t1 * aSpan, edgeR);
+          const y0 = baseY + t0 * 3.6 + 0.95;
+          const y1 = baseY + t1 * 3.6 + 0.95;
+          addStairRailSeg(batch, railMat, p0.x, y0, p0.z, p1.x, y1, p1.z, 0.032);
         }
       }
 
