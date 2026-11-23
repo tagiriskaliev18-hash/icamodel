@@ -1,0 +1,606 @@
+/* Camera & movement controller:
+   - Drone mode: free 6-DOF flight (WASD + Q/E + Shift + mouse drag / pointer-lock)
+     + smooth cinematic spline auto-orbit tour + instant camera presets.
+   - Human mode: first-person walking with gravity, stair/ramp climbing, spiral stair
+     support, wall/column collisions, and visible tuxedo body when looking down. */
+
+import * as THREE from 'three';
+import { clamp, easeInOut, PODIUM, LAYOUT } from './core.js';
+
+export const VIEWPOINTS = {
+  facade: {
+    label: 'Фасад',
+    pos: [24, 13.5, 52],
+    target: [-3, 9.5, 2],
+  },
+  aerial: {
+    label: 'Сверху',
+    pos: [-48, 42, 62],
+    target: [0, 6, -4],
+  },
+  rotunda: {
+    label: 'Ротонда',
+    pos: [12, 16.5, 31],
+    target: [0, 14.5, 0],
+  },
+  stair: {
+    label: 'Вход',
+    pos: [6.5, 4.2, 34],
+    target: [0, 5.2, 6],
+  },
+  lobby: {
+    label: 'Холл',
+    pos: [0, PODIUM + 2.1, 7.2],
+    target: [0, PODIUM + 2.2, -5.5],
+  },
+};
+
+const TOUR_KEYS = [
+  { pos: new THREE.Vector3(26, 13.5, 52), target: new THREE.Vector3(-2, 9.5, 2) },
+  { pos: new THREE.Vector3(-28, 17, 46), target: new THREE.Vector3(-4, 10, 0) },
+  { pos: new THREE.Vector3(-54, 34, 24), target: new THREE.Vector3(0, 7, -4) },
+  { pos: new THREE.Vector3(-12, 36, -54), target: new THREE.Vector3(4, 7, -4) },
+  { pos: new THREE.Vector3(48, 22, -16), target: new THREE.Vector3(4, 8, -2) },
+  { pos: new THREE.Vector3(44, 11, 34), target: new THREE.Vector3(0, 9.5, 4) },
+];
+
+const EYE_H = 1.68;
+const BODY_RADIUS = 0.38;
+const GRAVITY = 20.0;
+const JUMP_V = 6.2;
+
+function pointInPoly(px, pz, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i][0], zi = pts[i][1];
+    const xj = pts[j][0], zj = pts[j][1];
+    const intersect = ((zi > pz) !== (zj > pz)) &&
+      (px < ((xj - xi) * (pz - zi)) / (zj - zi + 1e-9) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function pushOutSegment(px, pz, ax, az, bx, bz, rad) {
+  const vx = bx - ax, vz = bz - az;
+  const len2 = vx * vx + vz * vz;
+  if (len2 < 1e-8) return { x: px, z: pz };
+  const t = clamp(((px - ax) * vx + (pz - az) * vz) / len2, 0, 1);
+  const cx = ax + vx * t, cz = az + vz * t;
+  const dx = px - cx, dz = pz - cz;
+  const d = Math.hypot(dx, dz);
+  if (d < rad && d > 1e-6) {
+    const push = (rad - d) / d;
+    return { x: px + dx * push, z: pz + dz * push };
+  }
+  return { x: px, z: pz };
+}
+
+export function createController(camera, domElement, colliders, character, opts = {}) {
+  const reducedMotion = !!opts.reducedMotion;
+  const onStateChange = opts.onStateChange || (() => {});
+
+  const posCurve = new THREE.CatmullRomCurve3(TOUR_KEYS.map((k) => k.pos), true, 'catmullrom', 0.5);
+  const tgtCurve = new THREE.CatmullRomCurve3(TOUR_KEYS.map((k) => k.target), true, 'catmullrom', 0.5);
+
+  const state = {
+    mode: 'drone',          // 'drone' | 'human'
+    tour: !reducedMotion,
+    tourT: 0,
+    yaw: 0,
+    pitch: -0.1,
+    vel: new THREE.Vector3(),
+    // human body feet position
+    feet: new THREE.Vector3(0, 0, 27.5),
+    vy: 0,
+    grounded: true,
+    spiralAngle: 0,
+    onSpiral: false,
+    // camera transition
+    trans: null,
+    pointerLocked: false,
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+    touchId: null,
+    keys: new Set(),
+    mobileMove: { x: 0, y: 0 },
+  };
+
+  const _tmpPos = new THREE.Vector3();
+  const _tmpTgt = new THREE.Vector3();
+  const _lookMat = new THREE.Matrix4();
+  const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+  function syncAnglesFromLook(from, to) {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    const horiz = Math.hypot(dx, dz) || 1e-5;
+    state.yaw = Math.atan2(-dx, -dz);
+    state.pitch = clamp(Math.atan2(dy, horiz), -1.48, 1.42);
+  }
+
+  function applyCameraAngles() {
+    _euler.set(state.pitch, state.yaw, 0, 'YXZ');
+    camera.quaternion.setFromEuler(_euler);
+  }
+
+  function floorHeightAt(x, z, curY) {
+    let h = 0;
+
+    // Grand entrance ramp (stairs)
+    for (const c of colliders) {
+      if (c.type === 'ramp') {
+        const dirX = Math.sin(c.az), dirZ = -Math.cos(c.az);
+        const sideX = -dirZ, sideZ = dirX;
+        const rAlong = x * dirX + z * dirZ;
+        const rSide = Math.abs(x * sideX + z * sideZ);
+        if (rSide <= c.width * 0.52 && rAlong >= c.r0 - 0.5 && rAlong <= c.r1 + 0.5) {
+          const t = clamp((c.r1 - rAlong) / (c.r1 - c.r0), 0, 1);
+          const rampY = c.y0 + t * (c.y1 - c.y0);
+          if (rampY <= curY + 0.85) h = Math.max(h, rampY);
+        }
+      } else if (c.type === 'floorCircle') {
+        if (Math.hypot(x - c.x, z - c.z) <= c.r) {
+          if (c.y <= curY + 0.65) h = Math.max(h, c.y);
+        }
+      } else if (c.type === 'floorRect') {
+        if (x >= c.x0 && x <= c.x1 && z >= c.z0 && z <= c.z1) {
+          if (c.y <= curY + 0.65) h = Math.max(h, c.y);
+        }
+      } else if (c.type === 'spiral') {
+        const r = Math.hypot(x, z);
+        if (r >= c.rMin && r <= c.rMax && curY >= c.y0 - 0.5 && curY <= c.y1 + 0.8) {
+          // Polar angle matches polar(a, r) => x = sin(a)*r, z = -cos(a)*r
+          let a = Math.atan2(x, -z);
+          if (a < 0) a += Math.PI * 2;
+          const totalRad = c.turns * Math.PI * 2;
+          // Choose turn closest to current Y
+          const estTurn = Math.round(((curY - c.y0) / (c.y1 - c.y0) * totalRad - a) / (Math.PI * 2));
+          const fullA = clamp(a + estTurn * Math.PI * 2, 0, totalRad);
+          const sy = c.y0 + (fullA / totalRad) * (c.y1 - c.y0);
+          if (Math.abs(sy - curY) < 0.95) {
+            h = Math.max(h, sy);
+          }
+        }
+      }
+    }
+
+    // Upper floor rings inside the rotunda hall (r = 3.7 .. 8.55)
+    const rCenter = Math.hypot(x, z);
+    if (rCenter >= 3.65 && rCenter <= LAYOUT.rotunda.hall) {
+      for (const lv of [3.6, 7.2]) {
+        const fy = PODIUM + lv;
+        if (curY >= fy - 0.55) h = Math.max(h, fy);
+      }
+    }
+    return h;
+  }
+
+  function resolveCollisions(pos, feetY) {
+    let px = pos.x, pz = pos.z;
+    const headY = feetY + EYE_H;
+
+    // Keep within site fence bounds
+    px = clamp(px, -55, 67);
+    pz = clamp(pz, -71, 58);
+
+    for (let iter = 0; iter < 2; iter++) {
+      for (const c of colliders) {
+        if (c.type === 'circle') {
+          if (headY < c.y0 || feetY > c.y1) continue;
+          const dx = px - c.x, dz = pz - c.z;
+          const d = Math.hypot(dx, dz);
+          const minD = c.r + BODY_RADIUS;
+          if (d < minD && d > 1e-5) {
+            const k = minD / d;
+            px = c.x + dx * k;
+            pz = c.z + dz * k;
+          }
+        } else if (c.type === 'rect') {
+          if (headY < c.y0 || feetY > c.y1) continue;
+          const cx = clamp(px, c.x0, c.x1);
+          const cz = clamp(pz, c.z0, c.z1);
+          const dx = px - cx, dz = pz - cz;
+          const d = Math.hypot(dx, dz);
+          if (d < BODY_RADIUS) {
+            if (d > 1e-5) {
+              const push = (BODY_RADIUS - d) / d;
+              px += dx * push;
+              pz += dz * push;
+            } else {
+              // inside rect: push out to nearest edge
+              const dl = Math.abs(px - c.x0), dr = Math.abs(c.x1 - px);
+              const dt = Math.abs(pz - c.z0), db = Math.abs(c.z1 - pz);
+              const m = Math.min(dl, dr, dt, db);
+              if (m === dl) px = c.x0 - BODY_RADIUS;
+              else if (m === dr) px = c.x1 + BODY_RADIUS;
+              else if (m === dt) pz = c.z0 - BODY_RADIUS;
+              else pz = c.z1 + BODY_RADIUS;
+            }
+          }
+        } else if (c.type === 'poly') {
+          if (headY < c.y0 || feetY > c.y1) continue;
+          if (pointInPoly(px, pz, c.pts)) {
+            // push out from nearest edge
+            let bestDist = Infinity, bestX = px, bestZ = pz;
+            for (let i = 0; i < c.pts.length; i++) {
+              const a = c.pts[i], b = c.pts[(i + 1) % c.pts.length];
+              const vx = b[0] - a[0], vz = b[1] - a[1];
+              const l2 = vx * vx + vz * vz;
+              const t = clamp(((px - a[0]) * vx + (pz - a[1]) * vz) / l2, 0, 1);
+              const cx = a[0] + vx * t, cz = a[1] + vz * t;
+              const d = Math.hypot(px - cx, pz - cz);
+              if (d < bestDist) {
+                bestDist = d;
+                const nx = -(vz) / Math.sqrt(l2), nz = vx / Math.sqrt(l2);
+                bestX = cx + nx * BODY_RADIUS;
+                bestZ = cz + nz * BODY_RADIUS;
+              }
+            }
+            px = bestX; pz = bestZ;
+          } else {
+            for (let i = 0; i < c.pts.length; i++) {
+              const a = c.pts[i], b = c.pts[(i + 1) % c.pts.length];
+              const out = pushOutSegment(px, pz, a[0], a[1], b[0], b[1], BODY_RADIUS);
+              px = out.x; pz = out.z;
+            }
+          }
+        }
+      }
+    }
+    pos.x = px;
+    pos.z = pz;
+  }
+
+  function updateCharacterTransform(dt, horizSpeed, airborne) {
+    if (!character) return;
+    const isHuman = state.mode === 'human';
+    character.root.visible = isHuman;
+    if (!isHuman) return;
+
+    // Position body slightly behind eye line so looking down along the chest plane
+    // cleanly reveals bow tie, white shirt, satin lapels, trousers and walking shoes.
+    const fwdX = -Math.sin(state.yaw);
+    const fwdZ = -Math.cos(state.yaw);
+    const backOffset = 0.16;
+    character.root.position.set(
+      state.feet.x - fwdX * backOffset,
+      state.feet.y,
+      state.feet.z - fwdZ * backOffset
+    );
+    // Character front is +Z, camera forward is -Z => rotate by yaw + PI
+    character.root.rotation.y = state.yaw + Math.PI;
+    character.update(dt, horizSpeed, airborne);
+  }
+
+  function setMode(mode, spawnOpts) {
+    if (mode !== 'drone' && mode !== 'human') return;
+    state.mode = mode;
+    state.trans = null;
+    state.vel.set(0, 0, 0);
+    camera.fov = mode === 'human' ? 68 : 48;
+    camera.updateProjectionMatrix();
+    if (mode === 'human') {
+      state.tour = false;
+      if (spawnOpts && spawnOpts.pos) {
+        state.feet.set(spawnOpts.pos[0], spawnOpts.pos[1], spawnOpts.pos[2]);
+        if (spawnOpts.yaw !== undefined) state.yaw = spawnOpts.yaw;
+        if (spawnOpts.pitch !== undefined) state.pitch = spawnOpts.pitch;
+      } else {
+        // If drone is close to ground & inside/near building, drop right there; else front forecourt
+        const nearHall = Math.hypot(camera.position.x, camera.position.z) < 8.0 && camera.position.y < PODIUM + 4.5;
+        if (nearHall) {
+          state.feet.set(camera.position.x, PODIUM, camera.position.z);
+          state.pitch = clamp(state.pitch, -1.45, 1.2);
+        } else {
+          state.feet.set(0, 0, 27.5);
+          state.yaw = 0; // looking north (-Z) toward entrance stairs
+          state.pitch = 0.04;
+        }
+      }
+      resolveCollisions(state.feet, state.feet.y);
+      state.feet.y = floorHeightAt(state.feet.x, state.feet.z, state.feet.y + 0.5);
+      state.vy = 0;
+      state.grounded = true;
+      camera.position.set(state.feet.x, state.feet.y + EYE_H, state.feet.z);
+      applyCameraAngles();
+      updateCharacterTransform(0.016, 0, false);
+    } else {
+      if (character) character.root.visible = false;
+      if (document.pointerLockElement === domElement) {
+        try { document.exitPointerLock(); } catch { /* ignore */ }
+      }
+      // Lift drone slightly above human head so transition feels airy
+      if (camera.position.y < 3.0) camera.position.y = 4.5;
+    }
+    onStateChange(getState());
+  }
+
+  function setTour(enabled) {
+    state.tour = !!enabled;
+    if (state.tour) {
+      if (state.mode !== 'drone') setMode('drone');
+      state.trans = null;
+    }
+    onStateChange(getState());
+  }
+
+  function goToViewpoint(id, instant = false) {
+    const vp = VIEWPOINTS[id];
+    if (!vp) return;
+    if (state.mode !== 'drone') setMode('drone');
+    state.tour = false;
+    const toPos = new THREE.Vector3(...vp.pos);
+    const toTgt = new THREE.Vector3(...vp.target);
+    if (instant || reducedMotion) {
+      camera.position.copy(toPos);
+      syncAnglesFromLook(toPos, toTgt);
+      applyCameraAngles();
+      state.trans = null;
+    } else {
+      // Compute current look target 18m ahead
+      const curDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      const fromTgt = camera.position.clone().addScaledVector(curDir, 18);
+      state.trans = {
+        t: 0,
+        dur: 1.05,
+        fromPos: camera.position.clone(),
+        fromTgt,
+        toPos,
+        toTgt,
+      };
+    }
+    onStateChange(getState());
+  }
+
+  function lookAt(px, py, pz, tx, ty, tz) {
+    state.tour = false;
+    state.trans = null;
+    camera.position.set(px, py, pz);
+    syncAnglesFromLook(camera.position, new THREE.Vector3(tx, ty, tz));
+    applyCameraAngles();
+  }
+
+  function setHumanPose(x, y, z, yaw, pitch, speed = 0) {
+    if (state.mode !== 'human') setMode('human');
+    state.feet.set(x, y, z);
+    state.yaw = yaw;
+    state.pitch = clamp(pitch, -1.48, 1.42);
+    state.vy = 0;
+    state.grounded = true;
+    camera.position.set(x, y + EYE_H, z);
+    applyCameraAngles();
+    // Advance walk cycle a bit if speed > 0 so legs show a natural mid-stride pose
+    if (speed > 0 && character) {
+      for (let i = 0; i < 8; i++) character.update(0.05, speed, false);
+    }
+    updateCharacterTransform(0.016, speed, false);
+  }
+
+  function getState() {
+    return {
+      mode: state.mode,
+      tour: state.tour,
+      pointerLocked: state.pointerLocked,
+    };
+  }
+
+  /* --------------------------------------------------------------- events */
+  function onKeyDown(e) {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    const code = e.code;
+    if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(code)) {
+      state.keys.add(code);
+      if (state.tour) {
+        state.tour = false;
+        onStateChange(getState());
+      }
+      if (state.trans) state.trans = null;
+      if (code === 'Space' && state.mode === 'human' && state.grounded) {
+        state.vy = JUMP_V;
+        state.grounded = false;
+      }
+    }
+    if (code === 'ShiftLeft' || code === 'ShiftRight') state.keys.add('Shift');
+    if (code === 'Digit1') goToViewpoint('facade');
+    if (code === 'Digit2') goToViewpoint('aerial');
+    if (code === 'Digit3') goToViewpoint('rotunda');
+    if (code === 'Digit4') goToViewpoint('lobby');
+    if (code === 'KeyV') setMode(state.mode === 'drone' ? 'human' : 'drone');
+    if (code === 'KeyT') setTour(!state.tour);
+  }
+
+  function onKeyUp(e) {
+    state.keys.delete(e.code);
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') state.keys.delete('Shift');
+  }
+
+  function onPointerDown(e) {
+    if (e.button !== 0) return;
+    if (state.tour) {
+      state.tour = false;
+      onStateChange(getState());
+    }
+    if (state.trans) state.trans = null;
+    state.dragging = true;
+    state.lastX = e.clientX;
+    state.lastY = e.clientY;
+    if (e.pointerType === 'touch') state.touchId = e.pointerId;
+  }
+
+  function onPointerMove(e) {
+    if (state.pointerLocked) {
+      const sens = 0.0022;
+      state.yaw -= e.movementX * sens;
+      state.pitch = clamp(state.pitch - e.movementY * sens, -1.48, 1.42);
+      return;
+    }
+    if (!state.dragging) return;
+    const dx = e.clientX - state.lastX;
+    const dy = e.clientY - state.lastY;
+    state.lastX = e.clientX;
+    state.lastY = e.clientY;
+    const sens = e.pointerType === 'touch' ? 0.0045 : 0.0032;
+    state.yaw -= dx * sens;
+    state.pitch = clamp(state.pitch - dy * sens, -1.48, 1.42);
+  }
+
+  function onPointerUp(e) {
+    if (e.pointerType === 'touch' && e.pointerId !== state.touchId) return;
+    state.dragging = false;
+    state.touchId = null;
+  }
+
+  function onWheel(e) {
+    if (state.mode !== 'drone') return;
+    if (state.tour) {
+      state.tour = false;
+      onStateChange(getState());
+    }
+    if (state.trans) state.trans = null;
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    const step = clamp(-e.deltaY * 0.025, -8, 8);
+    camera.position.addScaledVector(fwd, step);
+    camera.position.y = Math.max(1.2, camera.position.y);
+  }
+
+  function onPointerLockChange() {
+    state.pointerLocked = document.pointerLockElement === domElement;
+    onStateChange(getState());
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  domElement.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  domElement.addEventListener('wheel', onWheel, { passive: true });
+  document.addEventListener('pointerlockchange', onPointerLockChange);
+
+  // Initialize at hero facade viewpoint
+  goToViewpoint('facade', true);
+  state.tour = !reducedMotion;
+
+  /* --------------------------------------------------------------- update */
+  function update(dt) {
+    dt = clamp(dt, 0, 0.05);
+
+    if (state.mode === 'drone') {
+      if (state.trans) {
+        const tr = state.trans;
+        tr.t = Math.min(1, tr.t + dt / tr.dur);
+        const k = easeInOut(tr.t);
+        _tmpPos.lerpVectors(tr.fromPos, tr.toPos, k);
+        _tmpTgt.lerpVectors(tr.fromTgt, tr.toTgt, k);
+        camera.position.copy(_tmpPos);
+        syncAnglesFromLook(_tmpPos, _tmpTgt);
+        applyCameraAngles();
+        if (tr.t >= 1) state.trans = null;
+      } else if (state.tour) {
+        state.tourT = ((state.tourT + dt * 0.022) % 1 + 1) % 1;
+        posCurve.getPointAt(state.tourT, _tmpPos);
+        tgtCurve.getPointAt(state.tourT, _tmpTgt);
+        camera.position.lerp(_tmpPos, Math.min(1, dt * 3.5));
+        syncAnglesFromLook(camera.position, _tmpTgt);
+        applyCameraAngles();
+      } else {
+        applyCameraAngles();
+        const speed = state.keys.has('Shift') ? 32 : 14;
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+        const move = new THREE.Vector3();
+        if (state.keys.has('KeyW') || state.keys.has('ArrowUp')) move.add(fwd);
+        if (state.keys.has('KeyS') || state.keys.has('ArrowDown')) move.sub(fwd);
+        if (state.keys.has('KeyD') || state.keys.has('ArrowRight')) move.add(right);
+        if (state.keys.has('KeyA') || state.keys.has('ArrowLeft')) move.sub(right);
+        if (state.keys.has('KeyE')) move.y += 1;
+        if (state.keys.has('KeyQ')) move.y -= 1;
+        if (state.mobileMove.x || state.mobileMove.y) {
+          move.addScaledVector(fwd, state.mobileMove.y);
+          move.addScaledVector(right, state.mobileMove.x);
+        }
+        if (move.lengthSq() > 0) move.normalize().multiplyScalar(speed);
+        state.vel.lerp(move, Math.min(1, dt * 8));
+        camera.position.addScaledVector(state.vel, dt);
+        camera.position.x = clamp(camera.position.x, -110, 110);
+        camera.position.z = clamp(camera.position.z, -100, 110);
+        camera.position.y = clamp(camera.position.y, 1.2, 95);
+      }
+      updateCharacterTransform(dt, 0, false);
+      return;
+    }
+
+    /* Human mode */
+    applyCameraAngles();
+    const walkSpeed = state.keys.has('Shift') ? 6.2 : 3.4;
+    const fwdX = -Math.sin(state.yaw), fwdZ = -Math.cos(state.yaw);
+    const rightX = Math.cos(state.yaw), rightZ = -Math.sin(state.yaw);
+    let mx = 0, mz = 0;
+    if (state.keys.has('KeyW') || state.keys.has('ArrowUp')) { mx += fwdX; mz += fwdZ; }
+    if (state.keys.has('KeyS') || state.keys.has('ArrowDown')) { mx -= fwdX; mz -= fwdZ; }
+    if (state.keys.has('KeyD') || state.keys.has('ArrowRight')) { mx += rightX; mz += rightZ; }
+    if (state.keys.has('KeyA') || state.keys.has('ArrowLeft')) { mx -= rightX; mz -= rightZ; }
+    if (state.mobileMove.x || state.mobileMove.y) {
+      mx += fwdX * state.mobileMove.y + rightX * state.mobileMove.x;
+      mz += fwdZ * state.mobileMove.y + rightZ * state.mobileMove.x;
+    }
+    const mlen = Math.hypot(mx, mz);
+    if (mlen > 1e-4) { mx = (mx / mlen) * walkSpeed; mz = (mz / mlen) * walkSpeed; }
+
+    state.vel.x += (mx - state.vel.x) * Math.min(1, dt * 12);
+    state.vel.z += (mz - state.vel.z) * Math.min(1, dt * 12);
+    state.feet.x += state.vel.x * dt;
+    state.feet.z += state.vel.z * dt;
+
+    resolveCollisions(state.feet, state.feet.y);
+
+    const floorY = floorHeightAt(state.feet.x, state.feet.z, state.feet.y);
+    state.vy -= GRAVITY * dt;
+    state.feet.y += state.vy * dt;
+    if (state.feet.y <= floorY) {
+      state.feet.y = floorY;
+      state.vy = 0;
+      state.grounded = true;
+    } else if (state.feet.y - floorY < 0.25 && state.vy <= 0) {
+      // smooth step-down on stairs
+      state.feet.y = floorY;
+      state.vy = 0;
+      state.grounded = true;
+    } else {
+      state.grounded = false;
+    }
+
+    const horizSpeed = Math.hypot(state.vel.x, state.vel.z);
+    // subtle natural head bob while walking
+    const bobY = state.grounded && horizSpeed > 0.2
+      ? Math.sin(performance.now() * 0.011) * Math.min(0.035, horizSpeed * 0.008)
+      : 0;
+    camera.position.set(state.feet.x, state.feet.y + EYE_H + bobY, state.feet.z);
+    updateCharacterTransform(dt, horizSpeed, !state.grounded);
+  }
+
+  function setMobileMove(x, y) {
+    state.mobileMove.x = clamp(x, -1, 1);
+    state.mobileMove.y = clamp(y, -1, 1);
+    if ((x || y) && state.tour) {
+      state.tour = false;
+      onStateChange(getState());
+    }
+  }
+
+  return {
+    update,
+    setMode,
+    setTour,
+    goToViewpoint,
+    lookAt,
+    setHumanPose,
+    setMobileMove,
+    getState,
+    requestPointerLock() {
+      if (domElement.requestPointerLock) domElement.requestPointerLock();
+    },
+  };
+}
